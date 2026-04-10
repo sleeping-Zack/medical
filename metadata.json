@@ -1,0 +1,5 @@
+{
+  "name": "MedRemind: Smart Family Medication Assistant",
+  "description": "A dual-mode medication reminder app designed for families. Features a simplified interface for elders and a comprehensive management dashboard for caregivers, with AI-assisted verification.",
+  "requestFramePermissions": ["camera"]
+}

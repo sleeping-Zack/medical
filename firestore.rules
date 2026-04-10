@@ -1,0 +1,145 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: medications
+    // Fields:
+    //   - targetUserId: string (required, immutable)
+    //   - createdByUserId: string (required, immutable)
+    //   - name: string (required, 1-100 chars)
+    //   - specification: string (optional, 0-200 chars)
+    //   - dosageForm: string (required, enum)
+    //   - archived: bool (required)
+    //
+    // Collection: reminders
+    // Fields:
+    //   - targetUserId: string (required, immutable)
+    //   - planId: string (required, immutable)
+    //   - dueTime: string (required, ISO 8601)
+    //   - status: string (required, enum)
+    //   - confirmedAt: string (optional, ISO 8601)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "zhuxu2825@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidString(val, min, max) {
+      return val is string && val.size() >= min && val.size() <= max;
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    // Domain Validators
+    function isValidMedication(data) {
+      return data.keys().hasAll(['targetUserId', 'createdByUserId', 'name', 'dosageForm', 'archived']) &&
+             data.keys().hasOnly(['targetUserId', 'createdByUserId', 'name', 'dosageForm', 'archived', 'specification', 'note', 'createdAt', 'updatedAt', 'colorDesc', 'shapeDesc']) &&
+             data.targetUserId is string && data.targetUserId.size() > 0 &&
+             data.createdByUserId is string && data.createdByUserId.size() > 0 &&
+             isValidString(data.name, 1, 100) &&
+             data.dosageForm in ['tablet', 'capsule', 'liquid', 'granule', 'other'] &&
+             data.archived is bool &&
+             (!('specification' in data) || isValidString(data.specification, 0, 200)) &&
+             (!('note' in data) || isValidString(data.note, 0, 500)) &&
+             (!('colorDesc' in data) || isValidString(data.colorDesc, 0, 100)) &&
+             (!('shapeDesc' in data) || isValidString(data.shapeDesc, 0, 100));
+    }
+
+    function isValidReminder(data) {
+      return data.keys().hasAll(['targetUserId', 'planId', 'dueTime', 'status']) &&
+             data.keys().hasOnly(['targetUserId', 'planId', 'dueTime', 'status', 'confirmedAt', 'createdAt', 'scheduleId', 'medicineName', 'notifiedAt', 'snoozeUntil']) &&
+             data.targetUserId is string && data.targetUserId.size() > 0 &&
+             data.planId is string && data.planId.size() > 0 &&
+             isValidDateString(data.dueTime) &&
+             data.status in ['pending', 'notified', 'taken', 'snoozed', 'missed', 'deleted'] &&
+             (!('confirmedAt' in data) || isValidDateString(data.confirmedAt)) &&
+             (!('medicineName' in data) || isValidString(data.medicineName, 0, 100));
+    }
+
+    function isValidPlan(data) {
+      return data.keys().hasAll(['targetUserId', 'createdByUserId', 'medicineId', 'status', 'startDate', 'schedules']) &&
+             data.keys().hasOnly(['targetUserId', 'createdByUserId', 'medicineId', 'status', 'startDate', 'schedules', 'note', 'createdAt', 'updatedAt', 'endDate']) &&
+             data.targetUserId is string && data.targetUserId.size() > 0 &&
+             data.createdByUserId is string && data.createdByUserId.size() > 0 &&
+             data.medicineId is string && data.medicineId.size() > 0 &&
+             data.status in ['active', 'paused', 'ended'] &&
+             isValidDateString(data.startDate + "T00:00:00Z") &&
+             data.schedules is list &&
+             (!('note' in data) || isValidString(data.note, 0, 500)) &&
+             (!('endDate' in data) || isValidDateString(data.endDate + "T00:00:00Z"));
+    }
+
+    match /medications/{medId} {
+      allow read: if isAuthenticated() && (resource.data.targetUserId == request.auth.uid || resource.data.createdByUserId == request.auth.uid || isAdmin());
+      
+      allow create: if isAuthenticated() && 
+                      isValidMedication(request.resource.data) && 
+                      request.resource.data.createdByUserId == request.auth.uid;
+      
+      allow update: if isAuthenticated() && 
+                      isValidMedication(request.resource.data) && 
+                      resource.data.createdByUserId == request.auth.uid &&
+                      request.resource.data.createdByUserId == resource.data.createdByUserId &&
+                      request.resource.data.targetUserId == resource.data.targetUserId;
+      
+      allow delete: if isAuthenticated() && (resource.data.createdByUserId == request.auth.uid || isAdmin());
+    }
+
+    match /plans/{planId} {
+      allow read: if isAuthenticated() && (resource.data.targetUserId == request.auth.uid || resource.data.createdByUserId == request.auth.uid || isAdmin());
+      
+      allow create: if isAuthenticated() && 
+                      isValidPlan(request.resource.data) && 
+                      request.resource.data.createdByUserId == request.auth.uid;
+      
+      allow update: if isAuthenticated() && 
+                      isValidPlan(request.resource.data) && 
+                      resource.data.createdByUserId == request.auth.uid &&
+                      request.resource.data.createdByUserId == resource.data.createdByUserId &&
+                      request.resource.data.targetUserId == resource.data.targetUserId;
+
+      allow delete: if isAuthenticated() && (resource.data.createdByUserId == request.auth.uid || isAdmin());
+    }
+    
+    match /reminders/{remId} {
+      allow read: if isAuthenticated();
+      
+      allow create: if isAuthenticated() && 
+                      isValidReminder(request.resource.data);
+
+      allow update: if isAuthenticated() && 
+                      isValidReminder(request.resource.data);
+
+      allow delete: if isAuthenticated();
+    }
+
+    match /elder_bindings/{bindingId} {
+      allow read: if isAuthenticated() && (resource.data.managerUserId == request.auth.uid || resource.data.elderUserId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.managerUserId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && (resource.data.managerUserId == request.auth.uid || resource.data.elderUserId == request.auth.uid || isAdmin());
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && request.auth.uid == userId || isAdmin();
+    }
+  }
+}

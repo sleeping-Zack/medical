@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "Medication": {
+      "title": "Medication",
+      "description": "Definition of a medication",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "name": { "type": "string" },
+        "specification": { "type": "string" },
+        "dosageForm": { "type": "string", "enum": ["tablet", "capsule", "liquid", "granule", "other"] },
+        "archived": { "type": "boolean" }
+      },
+      "required": ["targetUserId", "createdByUserId", "name", "dosageForm"]
+    },
+    "MedicationPlan": {
+      "title": "Medication Plan",
+      "description": "A plan for taking medication",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "medicineId": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "paused", "ended"] },
+        "startDate": { "type": "string", "format": "date" }
+      },
+      "required": ["targetUserId", "medicineId", "status", "startDate"]
+    },
+    "ReminderEvent": {
+      "title": "Reminder Event",
+      "description": "An individual reminder instance",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "planId": { "type": "string" },
+        "dueTime": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["pending", "notified", "taken", "snoozed", "missed"] }
+      },
+      "required": ["targetUserId", "planId", "dueTime", "status"]
+    }
+  },
+  "firestore": {
+    "/medications/{medId}": {
+      "schema": { "$ref": "Medication" },
+      "description": "Collection of medications"
+    },
+    "/plans/{planId}": {
+      "schema": { "$ref": "MedicationPlan" },
+      "description": "Collection of medication plans"
+    },
+    "/reminders/{remId}": {
+      "schema": { "$ref": "ReminderEvent" },
+      "description": "Collection of reminder events"
+    }
+  }
+}
