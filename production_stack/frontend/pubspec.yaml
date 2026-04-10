@@ -1,0 +1,38 @@
+name: medapp_flutter
+description: A new Flutter project for MedApp.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Routing
+  go_router: ^12.1.1
+  
+  # State Management
+  flutter_riverpod: ^2.4.3
+  
+  # Networking
+  dio: ^5.3.3
+  
+  # Local Notifications
+  flutter_local_notifications: ^16.1.0
+  
+  # Device Capabilities
+  image_picker: ^1.0.4
+  permission_handler: ^11.0.1
+  
+  # UI & Styling
+  cupertino_icons: ^1.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
