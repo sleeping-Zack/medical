@@ -4,14 +4,24 @@ import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { UserRole } from '../types';
 
+const STRONG_PASSWORD = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/;
+
 interface AuthScreenProps {
   loginWithPhone: (phone: string, password: string) => Promise<void>;
-  registerWithPhone: (phone: string, password: string, role: UserRole) => Promise<void>;
+  registerWithPhone: (phone: string, password: string, role: UserRole, smsCode: string) => Promise<void>;
+  /** 调用后端发短信；返回开发环境 debug 验证码（若有） */
+  sendRegisterSms: (phone: string) => Promise<string | null>;
   isStandalone: boolean;
   setShowInstallGuide: (show: boolean) => void;
 }
 
-export function AuthScreen({ loginWithPhone, registerWithPhone, isStandalone, setShowInstallGuide }: AuthScreenProps) {
+export function AuthScreen({
+  loginWithPhone,
+  registerWithPhone,
+  sendRegisterSms,
+  isStandalone,
+  setShowInstallGuide,
+}: AuthScreenProps) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [phone, setPhone] = useState('');
   const [smsCode, setSmsCode] = useState('');
@@ -38,12 +48,20 @@ export function AuthScreen({ loginWithPhone, registerWithPhone, isStandalone, se
       return;
     }
     setIsSendingSms(true);
-    // Simulate sending SMS
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    setIsSendingSms(false);
-    setCountdown(60);
-    // In a real app, we would call a backend API to send the SMS here.
-    // For this MVP, we just simulate it. Any code will work.
+    try {
+      const debug = await sendRegisterSms(phone);
+      setCountdown(60);
+      if (debug) {
+        alert(`验证码已发送。开发环境验证码：${debug}`);
+      } else {
+        alert('验证码已发送，请查收短信');
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '发送失败';
+      alert(msg);
+    } finally {
+      setIsSendingSms(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -52,9 +70,16 @@ export function AuthScreen({ loginWithPhone, registerWithPhone, isStandalone, se
       alert('请输入正确的11位手机号');
       return;
     }
-    if (password.length < 6) {
-      alert('密码至少需要6位');
-      return;
+    if (mode === 'login') {
+      if (!password) {
+        alert('请输入密码');
+        return;
+      }
+    } else {
+      if (!STRONG_PASSWORD.test(password)) {
+        alert('密码至少 8 位，且必须同时包含字母和数字（与后端一致）');
+        return;
+      }
     }
 
     setLoading(true);
@@ -63,11 +88,11 @@ export function AuthScreen({ loginWithPhone, registerWithPhone, isStandalone, se
         await loginWithPhone(phone, password);
       } else {
         if (!smsCode || smsCode.length !== 6) {
-          alert('请输入6位短信验证码 (测试阶段可随意输入6位数字)');
+          alert('请输入 6 位短信验证码（须先点击获取验证码）');
           setLoading(false);
           return;
         }
-        await registerWithPhone(phone, password, role);
+        await registerWithPhone(phone, password, role, smsCode);
       }
     } catch (error) {
       // Error is handled in useAuth hook
@@ -202,7 +227,7 @@ export function AuthScreen({ loginWithPhone, registerWithPhone, isStandalone, se
               <label className="text-sm font-medium text-slate-700">密码</label>
               <input 
                 type="password" 
-                placeholder={mode === 'register' ? "设置至少6位密码" : "请输入密码"}
+                placeholder={mode === 'register' ? "至少8位，含字母+数字" : "请输入密码"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-4 rounded-2xl bg-slate-50 border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all text-lg font-medium"

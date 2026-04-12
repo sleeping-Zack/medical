@@ -35,22 +35,20 @@ import {
   Area
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  signInWithRedirect,
-  GoogleAuthProvider, 
-  signOut,
-  User
-} from 'firebase/auth';
-import { auth, db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { ApiError, getAccessToken, getRefreshToken, clearTokenPair } from './lib/api';
+import { fetchMe, loginWithPasswordApi, logoutApi, registerApi, sendRegisterSms, type UserMe } from './lib/authApi';
 import { cn, formatTime } from './lib/utils';
 import { UserRole, UserProfile, Medication, MedicationPlan, ReminderEvent, ElderBinding } from './types';
 import { MedicationForm } from './components/MedicationForm';
 import { PlanForm } from './components/PlanForm';
 import { AuthScreen } from './components/AuthScreen';
-import { medicationService } from './services/medicationService';
+import { getProfileFromRegistry, medicationService, syncProfileToRegistry } from './services/medicationService';
+
+/** 已登录用户（对接 JWT 后端，uid 为后端用户数字 id 的字符串） */
+export interface AuthUser {
+  uid: string;
+  phone: string;
+}
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -82,7 +80,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
       try {
         const parsedError = JSON.parse(this.state.error?.message || "");
         if (parsedError.error) {
-          errorMessage = `Firebase 错误: ${parsedError.error} (操作: ${parsedError.operationType})`;
+          errorMessage = `错误: ${parsedError.error} (操作: ${parsedError.operationType})`;
         }
       } catch (e) {
         // 不是 JSON 错误
@@ -109,12 +107,43 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   }
 }
 
-// Auth Hook
+// Auth Hook：对接 production_stack FastAPI（JWT），不再使用 Firebase
 const useAuth = () => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const applyMeToState = (me: UserMe) => {
+    const uid = String(me.id);
+    setUser({ uid, phone: me.phone });
+    const saved = localStorage.getItem(`profile_${uid}`);
+    if (saved) {
+      try {
+        const p = JSON.parse(saved) as UserProfile;
+        setProfile(p);
+        syncProfileToRegistry(p);
+        return;
+      } catch {
+        /* fallthrough */
+      }
+    }
+    const shortId = Math.floor(100000 + Math.random() * 900000).toString();
+    const defaultMode: UserRole = me.role === 'elderly' ? 'elder' : 'caregiver';
+    const p: UserProfile = {
+      uid,
+      displayName: `用户${me.phone.slice(-4)}`,
+      defaultMode,
+      fontScale: 1.2,
+      voiceEnabled: true,
+      highContrast: false,
+      shortId,
+      phone: me.phone,
+    };
+    localStorage.setItem(`profile_${uid}`, JSON.stringify(p));
+    setProfile(p);
+    syncProfileToRegistry(p);
+  };
 
   useEffect(() => {
     if (notification) {
@@ -124,128 +153,89 @@ const useAuth = () => {
   }, [notification]);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data() as UserProfile;
-            if (!data.shortId) {
-              data.shortId = Math.floor(100000 + Math.random() * 900000).toString();
-              await setDoc(doc(db, 'users', firebaseUser.uid), { shortId: data.shortId }, { merge: true });
-            }
-            setProfile(data);
-            localStorage.setItem(`profile_${firebaseUser.uid}`, JSON.stringify(data));
-          } else {
-            const shortId = Math.floor(100000 + Math.random() * 900000).toString();
-            const defaultProfile: UserProfile = {
-              uid: firebaseUser.uid,
-              displayName: firebaseUser.displayName || '用户',
-              defaultMode: 'caregiver',
-              fontScale: 1.2,
-              voiceEnabled: true,
-              highContrast: false,
-              shortId: shortId,
-              phone: ''
-            };
-            await setDoc(doc(db, 'users', firebaseUser.uid), defaultProfile);
-            setProfile(defaultProfile);
-            localStorage.setItem(`profile_${firebaseUser.uid}`, JSON.stringify(defaultProfile));
-          }
-        } catch (error) {
-          console.error("Error fetching profile", error);
-          const savedProfile = localStorage.getItem(`profile_${firebaseUser.uid}`);
-          if (savedProfile) {
-            setProfile(JSON.parse(savedProfile));
-          }
-        }
-      } else {
-        setProfile(null);
+    let cancelled = false;
+    (async () => {
+      if (!getAccessToken() && !getRefreshToken()) {
+        if (!cancelled) setLoading(false);
+        return;
       }
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
+      try {
+        const me = await fetchMe();
+        if (cancelled) return;
+        applyMeToState(me);
+      } catch {
+        clearTokenPair();
+        if (!cancelled) {
+          setUser(null);
+          setProfile(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loginWithPhone = async (phone: string, password: string) => {
     try {
-      const email = `${phone}@medapp.local`;
-      const { signInWithEmailAndPassword } = await import('firebase/auth');
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (error: any) {
-      console.error("登录失败", error);
-      if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
-        setNotification({ message: '手机号或密码错误', type: 'error' });
-      } else if (error.code === 'auth/operation-not-allowed') {
-        setNotification({ message: '请在 Firebase Console 中启用 Email/Password 登录方式', type: 'error' });
-      } else {
-        setNotification({ message: '登录失败，请重试', type: 'error' });
-      }
-      throw error;
+      const me = await loginWithPasswordApi(phone, password);
+      applyMeToState(me);
+    } catch (e) {
+      console.error('登录失败', e);
+      const msg = e instanceof ApiError ? e.message : '登录失败，请重试';
+      setNotification({ message: msg, type: 'error' });
+      throw e;
     }
   };
 
-  const registerWithPhone = async (phone: string, password: string, role: UserRole) => {
+  const registerWithPhone = async (
+    phone: string,
+    password: string,
+    role: UserRole,
+    smsCode: string,
+  ) => {
     try {
-      const email = `${phone}@medapp.local`;
-      const { createUserWithEmailAndPassword } = await import('firebase/auth');
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      
+      const apiRole = role === 'caregiver' ? 'personal' : 'elderly';
+      const me = await registerApi(phone, smsCode, password, apiRole);
+      const uid = String(me.id);
+      setUser({ uid, phone: me.phone });
       const shortId = Math.floor(100000 + Math.random() * 900000).toString();
       const newProfile: UserProfile = {
-        uid: userCredential.user.uid,
+        uid,
         displayName: `用户${phone.slice(-4)}`,
         defaultMode: role,
         fontScale: 1.2,
         voiceEnabled: true,
         highContrast: false,
         shortId,
-        phone
+        phone,
       };
-      await setDoc(doc(db, 'users', userCredential.user.uid), newProfile);
+      localStorage.setItem(`profile_${uid}`, JSON.stringify(newProfile));
       setProfile(newProfile);
-      
-    } catch (error: any) {
-      console.error("注册失败", error);
-      if (error.code === 'auth/email-already-in-use') {
-        setNotification({ message: '该手机号已注册，请直接登录', type: 'error' });
-      } else if (error.code === 'auth/weak-password') {
-        setNotification({ message: '密码太弱，请至少输入6位密码', type: 'error' });
-      } else if (error.code === 'auth/operation-not-allowed') {
-        setNotification({ message: '请在 Firebase Console 中启用 Email/Password 登录方式', type: 'error' });
-      } else {
-        setNotification({ message: '注册失败，请重试', type: 'error' });
-      }
-      throw error;
+      syncProfileToRegistry(newProfile);
+    } catch (e) {
+      console.error('注册失败', e);
+      const msg = e instanceof ApiError ? e.message : '注册失败，请重试';
+      setNotification({ message: msg, type: 'error' });
+      throw e;
     }
   };
 
-  const login = async (useRedirect = false) => {
-    const provider = new GoogleAuthProvider();
-    try {
-      if (useRedirect) {
-        await signInWithRedirect(auth, provider);
-      } else {
-        await signInWithPopup(auth, provider);
-      }
-    } catch (error: any) {
-      console.error("登录失败", error);
-      if (error.code === 'auth/popup-blocked') {
-        setNotification({ message: '登录窗口被拦截，请尝试使用“重定向登录”', type: 'error' });
-      } else {
-        setNotification({ message: '登录失败，请确保使用 Chrome 或 Safari 浏览器', type: 'error' });
-      }
-    }
+  const sendRegisterSmsCode = async (phone: string) => {
+    const data = await sendRegisterSms(phone);
+    return data.debug_code ?? null;
   };
 
   const logout = async () => {
     try {
-      await signOut(auth);
+      await logoutApi();
     } catch (error) {
-      console.error("退出失败", error);
+      console.error('退出失败', error);
     }
+    setUser(null);
+    setProfile(null);
   };
 
   const updateProfile = async (updates: Partial<UserProfile>) => {
@@ -253,18 +243,36 @@ const useAuth = () => {
     const updated = { ...profile, ...updates };
     setProfile(updated);
     localStorage.setItem(`profile_${user.uid}`, JSON.stringify(updated));
-    try {
-      await setDoc(doc(db, 'users', user.uid), updated, { merge: true });
-    } catch (error) {
-      console.error("Error updating profile", error);
-    }
+    syncProfileToRegistry(updated);
   };
 
-  return { user, profile, loading, login, loginWithPhone, registerWithPhone, logout, updateProfile, notification, setNotification };
+  return {
+    user,
+    profile,
+    loading,
+    loginWithPhone,
+    registerWithPhone,
+    sendRegisterSmsCode,
+    logout,
+    updateProfile,
+    notification,
+    setNotification,
+  };
 };
 
 function AppContent() {
-  const { user, profile, loading, login, loginWithPhone, registerWithPhone, logout, updateProfile, notification, setNotification } = useAuth();
+  const {
+    user,
+    profile,
+    loading,
+    loginWithPhone,
+    registerWithPhone,
+    sendRegisterSmsCode,
+    logout,
+    updateProfile,
+    notification,
+    setNotification,
+  } = useAuth();
   const [currentMode, setCurrentMode] = useState<UserRole>('caregiver');
   const [view, setView] = useState<'home' | 'medicines' | 'plans' | 'bindings' | 'reports' | 'settings'>('home');
   
@@ -291,7 +299,9 @@ function AppContent() {
         const isPending = r.status === 'pending';
         const isNotDismissed = !dismissedReminderIds.has(r.id);
         const isDue = new Date(r.dueTime) <= now;
-        const isNotTooOld = new Date(r.dueTime) > new Date(now.getTime() - 2 * 60 * 60 * 1000);
+        // 原 2 小时过短，稍晚打开页面会永远不弹；改为到点后 24 小时内仍可弹出
+        const isNotTooOld =
+          now.getTime() - new Date(r.dueTime).getTime() < 24 * 60 * 60 * 1000;
         
         // Check if it was snoozed and if the snooze time has passed
         const snoozeTime = snoozedReminders.get(r.id);
@@ -342,17 +352,10 @@ function AppContent() {
     const data = await medicationService.getBindings(user.uid) as ElderBinding[];
     setBindings(data);
     
-    // Fetch bound users' profiles
     const newBoundUsers: Record<string, UserProfile> = {};
     for (const binding of data) {
-      try {
-        const userDoc = await getDoc(doc(db, 'users', binding.elderUserId));
-        if (userDoc.exists()) {
-          newBoundUsers[binding.elderUserId] = userDoc.data() as UserProfile;
-        }
-      } catch (error) {
-        console.error("Error fetching bound user profile", error);
-      }
+      const p = getProfileFromRegistry(binding.elderUserId);
+      if (p) newBoundUsers[binding.elderUserId] = p;
     }
     setBoundUsers(newBoundUsers);
   };
@@ -464,8 +467,38 @@ function AppContent() {
 
   if (!user) {
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone;
-    
-    return <AuthScreen loginWithPhone={loginWithPhone} registerWithPhone={registerWithPhone} isStandalone={isStandalone} setShowInstallGuide={setShowInstallGuide} />;
+
+    return (
+      <>
+        <AuthScreen
+          loginWithPhone={loginWithPhone}
+          registerWithPhone={registerWithPhone}
+          sendRegisterSms={sendRegisterSmsCode}
+          isStandalone={isStandalone}
+          setShowInstallGuide={setShowInstallGuide}
+        />
+        <AnimatePresence>
+          {notification && (
+            <motion.div
+              initial={{ y: -100, opacity: 0 }}
+              animate={{ y: 20, opacity: 1 }}
+              exit={{ y: -100, opacity: 0 }}
+              className="fixed top-0 left-0 right-0 z-[100] flex justify-center pointer-events-none"
+            >
+              <div
+                className={cn(
+                  'px-6 py-3 rounded-2xl shadow-lg font-bold flex items-center space-x-2 pointer-events-auto',
+                  notification.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
+                )}
+              >
+                {notification.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                <span>{notification.message}</span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </>
+    );
   }
 
   return (
@@ -585,11 +618,7 @@ function AppContent() {
             onClick={() => setView('settings')}
             className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border-2 border-transparent hover:border-blue-500 transition-all"
           >
-            {user.photoURL ? (
-              <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-            ) : (
-              <UserCircle className="w-8 h-8 text-slate-400" />
-            )}
+            <UserCircle className="w-8 h-8 text-slate-400" />
           </button>
         </div>
       </header>

@@ -1,352 +1,375 @@
+import type { ElderBinding, Medication, MedicationPlan, ReminderEvent, UserProfile } from '../types';
 
-import { 
-  collection, 
-  doc, 
-  addDoc, 
-  getDocs, 
-  getDoc,
-  updateDoc, 
-  deleteDoc,
-  query, 
-  where, 
-  onSnapshot,
-  Timestamp,
-  getDocFromServer,
-  writeBatch
-} from 'firebase/firestore';
-import { db, auth } from '../firebase';
-import { Medication, MedicationPlan, ReminderEvent, IntakeRecord } from '../types';
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
+/** 解析 YYYY-MM-DD 为本地零点，避免时区偏移 */
+function parseLocalDateYmd(ymd: string): Date {
+  const part = ymd.split('T')[0];
+  const [y, m, d] = part.split('-').map((x) => parseInt(x, 10));
+  return new Date(y || 1970, (m || 1) - 1, d || 1);
 }
 
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
+function sameLocalCalendarDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+/** weekdaysMask 下标 0=周日 … 6=周六，与 Date#getDay() 一致 */
+function isWeekdayActive(d: Date, mask: string | undefined): boolean {
+  if (!mask || mask.length !== 7) return true;
+  return mask[d.getDay()] === '1';
+}
+
+/**
+ * 按活跃计划为「今天」生成提醒（原逻辑只在创建计划当天写一次，第二天起列表为空，弹窗也不会再出）
+ */
+function syncTodayRemindersFromPlans(userId: string, store: LocalStore): boolean {
+  const now = new Date();
+  const dayAnchor = new Date(now);
+  dayAnchor.setHours(0, 0, 0, 0);
+
+  let changed = false;
+  for (const plan of store.plans) {
+    if (plan.targetUserId !== userId) continue;
+    if (plan.status !== 'active') continue;
+
+    const start = plan.startDate ? parseLocalDateYmd(plan.startDate) : new Date(dayAnchor);
+    start.setHours(0, 0, 0, 0);
+    if (dayAnchor < start) continue;
+
+    if (plan.endDate) {
+      const end = parseLocalDateYmd(plan.endDate);
+      end.setHours(23, 59, 59, 999);
+      if (now > end) continue;
+    }
+
+    const med = store.medications.find((m) => m.id === plan.medicineId);
+    const medicineName = med?.name ?? '药品';
+
+    for (const sched of plan.schedules) {
+      if (!isWeekdayActive(now, sched.weekdaysMask)) continue;
+
+      const due = new Date(dayAnchor);
+      due.setHours(sched.hour ?? 0, sched.minute ?? 0, 0, 0);
+
+      const dup = store.reminders.some((r) => {
+        if (r.planId !== plan.id) return false;
+        const rt = new Date(r.dueTime);
+        return (
+          rt.getFullYear() === due.getFullYear() &&
+          rt.getMonth() === due.getMonth() &&
+          rt.getDate() === due.getDate() &&
+          rt.getHours() === due.getHours() &&
+          rt.getMinutes() === due.getMinutes()
+        );
+      });
+      if (dup) continue;
+
+      const createdAt = new Date().toISOString();
+      store.reminders.push({
+        id: newId(),
+        targetUserId: userId,
+        planId: plan.id,
+        scheduleId: sched.id || newId(),
+        dueTime: due.toISOString(),
+        status: 'pending',
+        medicineName,
+        createdAt,
+      });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+const REGISTRY_KEY = 'medapp_user_registry';
+
+interface Registry {
+  users: Record<
+    string,
+    {
+      phone: string;
+      shortId: string;
+      displayName: string;
+    }
+  >;
+}
+
+interface LocalStore {
+  medications: Medication[];
+  plans: MedicationPlan[];
+  reminders: ReminderEvent[];
+  bindings: ElderBinding[];
+}
+
+function loadRegistry(): Registry {
+  try {
+    const raw = localStorage.getItem(REGISTRY_KEY);
+    if (!raw) return { users: {} };
+    return JSON.parse(raw) as Registry;
+  } catch {
+    return { users: {} };
   }
 }
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
+function saveRegistry(reg: Registry): void {
+  localStorage.setItem(REGISTRY_KEY, JSON.stringify(reg));
+}
+
+export function syncProfileToRegistry(profile: UserProfile): void {
+  const reg = loadRegistry();
+  reg.users[profile.uid] = {
+    phone: profile.phone || '',
+    shortId: profile.shortId || '',
+    displayName: profile.displayName,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  saveRegistry(reg);
+}
+
+export function getProfileFromRegistry(uid: string): UserProfile | null {
+  const reg = loadRegistry();
+  const u = reg.users[uid];
+  if (!u) return null;
+  return {
+    uid,
+    displayName: u.displayName,
+    defaultMode: 'elder',
+    fontScale: 1.2,
+    voiceEnabled: true,
+    highContrast: false,
+    phone: u.phone,
+    shortId: u.shortId,
+  };
+}
+
+function storeKey(userId: string): string {
+  return `medapp_store_${userId}`;
+}
+
+function loadStore(userId: string): LocalStore {
+  try {
+    const raw = localStorage.getItem(storeKey(userId));
+    if (!raw) {
+      return { medications: [], plans: [], reminders: [], bindings: [] };
+    }
+    return JSON.parse(raw) as LocalStore;
+  } catch {
+    return { medications: [], plans: [], reminders: [], bindings: [] };
+  }
+}
+
+function saveStore(userId: string, store: LocalStore): void {
+  localStorage.setItem(storeKey(userId), JSON.stringify(store));
+}
+
+function newId(): string {
+  return crypto.randomUUID();
 }
 
 class MedicationService {
-  async testConnection() {
-    try {
-      await getDocFromServer(doc(db, 'test', 'connection'));
-    } catch (error) {
-      if(error instanceof Error && error.message.includes('the client is offline')) {
-        console.error("Please check your Firebase configuration. ");
-      }
-    }
+  testConnection(): void {
+    /* 无远程存储，跳过 */
   }
 
-  async getBindings(userId: string) {
-    try {
-      const q = query(collection(db, 'elder_bindings'), where('managerUserId', '==', userId));
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, 'elder_bindings');
-      return [];
-    }
+  async getBindings(userId: string): Promise<ElderBinding[]> {
+    const store = loadStore(userId);
+    return store.bindings.filter((b) => b.active);
   }
 
-  async bindElder(managerUserId: string, shortId: string, phoneLast4: string) {
-    try {
-      // Find the elder user by shortId
-      const usersRef = collection(db, 'users');
-      const q = query(usersRef, where('shortId', '==', shortId));
-      const snapshot = await getDocs(q);
-      
-      if (snapshot.empty) {
-        throw new Error('未找到该 ID 的用户');
+  async bindElder(managerUserId: string, shortId: string, phoneLast4: string): Promise<{ success: boolean; elderId: string }> {
+    const reg = loadRegistry();
+    let elderId: string | null = null;
+    for (const [uid, u] of Object.entries(reg.users)) {
+      if (u.shortId === shortId) {
+        elderId = uid;
+        break;
       }
-
-      const elderDoc = snapshot.docs[0];
-      const elderData = elderDoc.data();
-
-      // Verify phone last 4 digits
-      if (!elderData.phone || !elderData.phone.endsWith(phoneLast4)) {
-        throw new Error('手机尾号不匹配');
-      }
-
-      if (elderDoc.id === managerUserId) {
-        throw new Error('不能绑定自己');
-      }
-
-      // Check if already bound
-      const existingQ = query(
-        collection(db, 'elder_bindings'), 
-        where('managerUserId', '==', managerUserId),
-        where('elderUserId', '==', elderDoc.id)
-      );
-      const existingSnapshot = await getDocs(existingQ);
-      if (!existingSnapshot.empty) {
-        throw new Error('已经绑定过该用户');
-      }
-
-      // Create binding
-      const bindingData = {
-        managerUserId,
-        elderUserId: elderDoc.id,
-        relationType: 'family',
-        canViewRecords: true,
-        canViewImages: true,
-        canReceiveAlerts: true,
-        canEditPlans: true,
-        active: true,
-        createdAt: new Date().toISOString()
-      };
-
-      await addDoc(collection(db, 'elder_bindings'), bindingData);
-      return { success: true, elderId: elderDoc.id };
-    } catch (error: any) {
-      if (error.message.includes('未找到') || error.message.includes('不匹配') || error.message.includes('不能') || error.message.includes('已经')) {
-        throw error;
-      }
-      handleFirestoreError(error, OperationType.CREATE, 'elder_bindings');
-      throw error;
     }
+    if (!elderId) throw new Error('未找到该 ID 的用户');
+
+    const elder = reg.users[elderId];
+    if (!elder.phone || !elder.phone.endsWith(phoneLast4)) {
+      throw new Error('手机尾号不匹配');
+    }
+    if (elderId === managerUserId) throw new Error('不能绑定自己');
+
+    const store = loadStore(managerUserId);
+    const exists = store.bindings.some(
+      (b) => b.managerUserId === managerUserId && b.elderUserId === elderId && b.active,
+    );
+    if (exists) throw new Error('已经绑定过该用户');
+
+    const binding: ElderBinding = {
+      id: newId(),
+      managerUserId,
+      elderUserId: elderId,
+      relationType: 'family',
+      canViewRecords: true,
+      canViewImages: true,
+      canReceiveAlerts: true,
+      canEditPlans: true,
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+    store.bindings.push(binding);
+    saveStore(managerUserId, store);
+    return { success: true, elderId };
   }
 
   async getMedications(targetUserId: string): Promise<Medication[]> {
-    const path = 'medications';
-    try {
-      const q = query(collection(db, path), where('targetUserId', '==', targetUserId), where('archived', '==', false));
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Medication));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, path);
-      return [];
-    }
+    const store = loadStore(targetUserId);
+    return store.medications.filter((m) => !m.archived);
   }
 
   async getPlans(targetUserId: string): Promise<MedicationPlan[]> {
-    const path = 'plans';
-    try {
-      const q = query(collection(db, path), where('targetUserId', '==', targetUserId));
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MedicationPlan));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, path);
-      return [];
-    }
+    return loadStore(targetUserId).plans;
   }
 
   async addMedication(med: Omit<Medication, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    const path = 'medications';
-    try {
-      const docRef = await addDoc(collection(db, path), {
-        ...med,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      return docRef.id;
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-      return '';
-    }
+    const store = loadStore(med.targetUserId);
+    const id = newId();
+    const now = new Date().toISOString();
+    store.medications.push({
+      ...med,
+      id,
+      createdAt: now,
+      updatedAt: now,
+    });
+    saveStore(med.targetUserId, store);
+    return id;
   }
 
   async updateMedication(id: string, updates: Partial<Medication>): Promise<void> {
-    const path = `medications/${id}`;
-    try {
-      const docRef = doc(db, 'medications', id);
-      await updateDoc(docRef, {
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+    /* 在所有 store 中查找（通常只有本人 targetUserId） */
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith('medapp_store_')) continue;
+      const userId = key.replace('medapp_store_', '');
+      const store = loadStore(userId);
+      const idx = store.medications.findIndex((m) => m.id === id);
+      if (idx >= 0) {
+        store.medications[idx] = {
+          ...store.medications[idx],
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        };
+        saveStore(userId, store);
+        return;
+      }
     }
   }
 
   async deleteMedication(id: string): Promise<void> {
-    const path = `medications/${id}`;
-    try {
-      const docRef = doc(db, 'medications', id);
-      await updateDoc(docRef, { archived: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
-    }
+    await this.updateMedication(id, { archived: true });
   }
 
   async getTodayReminders(targetUserId: string): Promise<ReminderEvent[]> {
-    const path = 'reminders';
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const q = query(
-        collection(db, path), 
-        where('targetUserId', '==', targetUserId),
-        where('dueTime', '>=', today.toISOString()),
-        where('dueTime', '<', tomorrow.toISOString())
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ReminderEvent));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, path);
-      return [];
+    const store = loadStore(targetUserId);
+    if (syncTodayRemindersFromPlans(targetUserId, store)) {
+      saveStore(targetUserId, store);
     }
-  }
-
-  subscribeToTodayReminders(targetUserId: string, callback: (events: ReminderEvent[]) => void) {
-    const path = 'reminders';
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    const q = query(
-      collection(db, path), 
-      where('targetUserId', '==', targetUserId),
-      where('dueTime', '>=', today.toISOString()),
-      where('dueTime', '<', tomorrow.toISOString())
+    return store.reminders.filter(
+      (r) => r.targetUserId === targetUserId && sameLocalCalendarDay(new Date(r.dueTime), today),
     );
-
-    return onSnapshot(q, (snapshot) => {
-      const events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ReminderEvent));
-      // Sort by dueTime
-      events.sort((a, b) => new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime());
-      callback(events);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
-    });
   }
 
-  async confirmIntake(eventId: string, userId: string): Promise<void> {
-    const path = `reminders/${eventId}`;
-    try {
-      const eventRef = doc(db, 'reminders', eventId);
-      await updateDoc(eventRef, {
-        status: 'taken',
-        confirmedAt: new Date().toISOString()
+  subscribeToTodayReminders(targetUserId: string, callback: (events: ReminderEvent[]) => void): () => void {
+    const run = () => {
+      void this.getTodayReminders(targetUserId).then((events) => {
+        events.sort((a, b) => new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime());
+        callback(events);
       });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+    };
+    run();
+    const id = window.setInterval(run, 3000);
+    return () => window.clearInterval(id);
+  }
+
+  async confirmIntake(eventId: string, _userId: string): Promise<void> {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith('medapp_store_')) continue;
+      const uid = key.replace('medapp_store_', '');
+      const store = loadStore(uid);
+      const idx = store.reminders.findIndex((r) => r.id === eventId);
+      if (idx >= 0) {
+        store.reminders[idx] = {
+          ...store.reminders[idx],
+          status: 'taken',
+          confirmedAt: new Date().toISOString(),
+        };
+        saveStore(uid, store);
+        return;
+      }
     }
   }
 
   async deleteReminder(eventId: string): Promise<void> {
-    const path = `reminders/${eventId}`;
-    try {
-      const eventRef = doc(db, 'reminders', eventId);
-      await deleteDoc(eventRef);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith('medapp_store_')) continue;
+      const uid = key.replace('medapp_store_', '');
+      const store = loadStore(uid);
+      const idx = store.reminders.findIndex((r) => r.id === eventId);
+      if (idx >= 0) {
+        store.reminders.splice(idx, 1);
+        saveStore(uid, store);
+        return;
+      }
     }
   }
 
   async addMedicationPlan(plan: Omit<MedicationPlan, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    const path = 'plans';
-    try {
-      // Fetch medicine name for denormalization into reminders
-      const medDoc = await getDoc(doc(db, 'medications', plan.medicineId));
-      const medicineName = medDoc.exists() ? medDoc.data().name : '药品';
+    const store = loadStore(plan.targetUserId);
+    const med = store.medications.find((m) => m.id === plan.medicineId);
+    const medicineName = med?.name ?? '药品';
+    const planId = newId();
+    const createdAt = new Date().toISOString();
+    const fullPlan: MedicationPlan = {
+      ...plan,
+      id: planId,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    store.plans.push(fullPlan);
 
-      const batch = writeBatch(db);
-      const planRef = doc(collection(db, 'plans'));
-      const createdAt = new Date().toISOString();
-      
-      batch.set(planRef, {
-        ...plan,
-        createdAt,
-        updatedAt: createdAt,
-      });
-      
-      // Generate initial reminders for today
-      const now = new Date();
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      for (const schedule of plan.schedules) {
-        const dueTime = new Date(today);
-        dueTime.setHours(schedule.hour, schedule.minute, 0, 0);
-        
-        // Only create reminder if it's in the future (or very recent past for testing/drift)
-        if (dueTime.getTime() > now.getTime() - 5 * 60 * 1000) {
-          const reminderRef = doc(collection(db, 'reminders'));
-          batch.set(reminderRef, {
-            targetUserId: plan.targetUserId,
-            planId: planRef.id,
-            medicineName, // Denormalized name
-            scheduleId: '', // We don't have schedule IDs yet in this simplified model
-            dueTime: dueTime.toISOString(),
-            status: 'pending',
-            createdAt
-          });
-        }
+    const now = new Date();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (const schedule of plan.schedules) {
+      const dueTime = new Date(today);
+      dueTime.setHours(schedule.hour, schedule.minute, 0, 0);
+      if (dueTime.getTime() > now.getTime() - 5 * 60 * 1000) {
+        store.reminders.push({
+          id: newId(),
+          targetUserId: plan.targetUserId,
+          planId,
+          scheduleId: schedule.id || newId(),
+          dueTime: dueTime.toISOString(),
+          status: 'pending',
+          medicineName,
+          createdAt,
+        });
       }
-
-      await batch.commit();
-      return planRef.id;
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-      return '';
     }
+    saveStore(plan.targetUserId, store);
+    return planId;
   }
 
   async addTestReminder(userId: string): Promise<void> {
-    const path = 'reminders';
-    try {
-      const now = new Date();
-      const testTime = new Date(now.getTime() + 5000); // 5 seconds from now
-      
-      await addDoc(collection(db, path), {
-        targetUserId: userId,
-        planId: 'test-plan',
-        scheduleId: 'test-schedule',
-        dueTime: testTime.toISOString(),
-        status: 'pending',
-        createdAt: now.toISOString()
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-    }
+    const store = loadStore(userId);
+    const now = new Date();
+    const testTime = new Date(now.getTime() + 5000);
+    store.reminders.push({
+      id: newId(),
+      targetUserId: userId,
+      planId: 'test-plan',
+      scheduleId: 'test-schedule',
+      dueTime: testTime.toISOString(),
+      status: 'pending',
+      createdAt: now.toISOString(),
+    });
+    saveStore(userId, store);
   }
 }
 
 export const medicationService = new MedicationService();
-medicationService.testConnection();

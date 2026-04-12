@@ -1,57 +1,41 @@
-version: '3.8'
-
 services:
-  db:
-    image: postgres:15-alpine
+  mysql:
+    image: mysql:8.4
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: medapp
+      MYSQL_DATABASE: medapp
+      MYSQL_USER: medapp
+      MYSQL_PASSWORD: medapp_pwd
+      MYSQL_ROOT_PASSWORD: root_pwd
+      TZ: Asia/Shanghai
     ports:
-      - "5432:5432"
+      - "${MYSQL_HOST_PORT:-3307}:3306"
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mysql_data:/var/lib/mysql
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
 
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password123
+  api:
+    build: ./backend
     ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-
-  # FastAPI Backend (Uncomment when Dockerfile is ready)
-  # api:
-  #   build: ./backend
-  #   ports:
-  #     - "8000:8000"
-  #   depends_on:
-  #     - db
-  #     - redis
-  #   environment:
-  #     - DATABASE_URL=postgresql://user:password@db:5432/medapp
-  #     - REDIS_URL=redis://redis:6379/0
-
-  # Celery Worker
-  # celery_worker:
-  #   build: ./backend
-  #   command: celery -A core.celery_app worker --loglevel=info
-  #   depends_on:
-  #     - db
-  #     - redis
+      - "${API_HOST_PORT:-8000}:8000"
+    depends_on:
+      - mysql
+      - redis
+    environment:
+      APP_ENV: dev
+      DEBUG: "true"
+      MYSQL_DSN: mysql+pymysql://medapp:medapp_pwd@mysql:3306/medapp?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: PLEASE_CHANGE_ME_TO_A_LONG_RANDOM_STRING
+      SMS_PROVIDER: mock
+      SMS_CODE_SALT: PLEASE_CHANGE_ME_TOO
 
 volumes:
-  postgres_data:
+  mysql_data:
   redis_data:
-  minio_data:
