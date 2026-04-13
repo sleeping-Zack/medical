@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.repositories.user_repo import UserRepository
 from app.core.redis_client import get_redis
 from app.schemas.auth import (
     LoginPasswordRequest,
@@ -133,5 +134,14 @@ def logout(
 @router.get("/me", response_model=ApiResponse[UserMe])
 def me(
     current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return ApiResponse(data=UserMe(id=current_user.id, phone=current_user.phone, role=current_user.role))
+    u = UserRepository(db).ensure_short_id(current_user)
+    return ApiResponse(
+        data=UserMe(
+            id=u.id,
+            phone=u.phone,
+            role=u.role,
+            short_id=u.short_id or "",
+        )
+    )

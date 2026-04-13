@@ -5,9 +5,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.errors import unauthorized
+from app.core.errors import forbidden, unauthorized
 from app.core.security import decode_token
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.repositories.user_repo import UserRepository
 
 http_bearer = HTTPBearer(auto_error=False)
@@ -32,4 +32,10 @@ def get_current_user(
     if not user:
         raise unauthorized()
     return user
+
+
+def require_personal(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.PERSONAL:
+        raise forbidden("仅限个人端使用此功能")
+    return current_user
 

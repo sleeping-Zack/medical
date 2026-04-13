@@ -1,4 +1,11 @@
-import type { ElderBinding, Medication, MedicationPlan, ReminderEvent, UserProfile } from '../types';
+import type {
+  ElderBinding,
+  ElderManagerLink,
+  Medication,
+  MedicationPlan,
+  ReminderEvent,
+  UserProfile,
+} from '../types';
 
 /** 解析 YYYY-MM-DD 为本地零点，避免时区偏移 */
 function parseLocalDateYmd(ymd: string): Date {
@@ -97,6 +104,8 @@ interface LocalStore {
   plans: MedicationPlan[];
   reminders: ReminderEvent[];
   bindings: ElderBinding[];
+  /** 绑定我的子女/看护人（长辈端展示用） */
+  managerLinks?: ElderManagerLink[];
 }
 
 function loadRegistry(): Registry {
@@ -143,15 +152,71 @@ function storeKey(userId: string): string {
   return `medapp_store_${userId}`;
 }
 
+function emptyStore(): LocalStore {
+  return { medications: [], plans: [], reminders: [], bindings: [], managerLinks: [] };
+}
+
+function normalizeStore(parsed: Partial<LocalStore>): LocalStore {
+  return {
+    medications: parsed.medications ?? [],
+    plans: parsed.plans ?? [],
+    reminders: parsed.reminders ?? [],
+    bindings: parsed.bindings ?? [],
+    managerLinks: parsed.managerLinks ?? [],
+  };
+}
+
 function loadStore(userId: string): LocalStore {
   try {
     const raw = localStorage.getItem(storeKey(userId));
     if (!raw) {
-      return { medications: [], plans: [], reminders: [], bindings: [] };
+      return emptyStore();
     }
-    return JSON.parse(raw) as LocalStore;
+    return normalizeStore(JSON.parse(raw) as Partial<LocalStore>);
   } catch {
-    return { medications: [], plans: [], reminders: [], bindings: [] };
+    return emptyStore();
+  }
+}
+
+/**
+ * 从所有账号的 store 里找出「绑定本长辈」的记录，合并进长辈的 managerLinks。
+ * 解决：绑定只写在子女 medapp_store 时，长辈端同浏览器能同步看到。
+ */
+function syncElderManagerLinksFromAllStores(elderUserId: string): void {
+  const uidNorm = String(elderUserId);
+  const elderStore = loadStore(uidNorm);
+  const byBindingId = new Map<string, ElderManagerLink>();
+
+  for (const link of elderStore.managerLinks ?? []) {
+    byBindingId.set(String(link.bindingId), link);
+  }
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key?.startsWith('medapp_store_')) continue;
+    const managerUid = key.replace('medapp_store_', '');
+    if (managerUid === uidNorm) continue;
+
+    const store = loadStore(managerUid);
+    for (const b of store.bindings) {
+      if (!b.active || String(b.elderUserId) !== uidNorm) continue;
+      if (!byBindingId.has(b.id)) {
+        byBindingId.set(b.id, {
+          managerUserId: managerUid,
+          relationType: b.relationType || 'family',
+          createdAt: b.createdAt,
+          bindingId: b.id,
+        });
+      }
+    }
+  }
+
+  const merged = Array.from(byBindingId.values());
+  const prev = JSON.stringify(elderStore.managerLinks ?? []);
+  const next = JSON.stringify(merged);
+  if (prev !== next) {
+    elderStore.managerLinks = merged;
+    saveStore(uidNorm, elderStore);
   }
 }
 
@@ -210,7 +275,46 @@ class MedicationService {
     };
     store.bindings.push(binding);
     saveStore(managerUserId, store);
+
+    // 同步写入长辈端 store：长辈登录本机时可直接读取，无需再扫子女 store
+    const link: ElderManagerLink = {
+      managerUserId,
+      relationType: binding.relationType,
+      createdAt: binding.createdAt,
+      bindingId: binding.id,
+    };
+    const elderStore = loadStore(elderId);
+    const links = elderStore.managerLinks ?? [];
+    if (!links.some((l) => l.bindingId === link.bindingId || l.managerUserId === managerUserId)) {
+      elderStore.managerLinks = [...links, link];
+      saveStore(elderId, elderStore);
+    }
+
     return { success: true, elderId };
+  }
+
+  /**
+   * 长辈端：返回已绑定的子女/看护人（先合并全机扫描结果，再读 managerLinks）
+   */
+  getManagersForElder(elderUserId: string): { uid: string; name: string; phone: string; relation: string }[] {
+    syncElderManagerLinksFromAllStores(String(elderUserId));
+    const store = loadStore(String(elderUserId));
+    const list: { uid: string; name: string; phone: string; relation: string }[] = [];
+    const seen = new Set<string>();
+
+    for (const link of store.managerLinks ?? []) {
+      const mu = String(link.managerUserId);
+      if (seen.has(mu)) continue;
+      seen.add(mu);
+      const p = getProfileFromRegistry(mu);
+      list.push({
+        uid: mu,
+        name: p?.displayName || '家人',
+        phone: p?.phone || '',
+        relation: link.relationType === 'family' ? '家人' : link.relationType || '家人',
+      });
+    }
+    return list;
   }
 
   async getMedications(targetUserId: string): Promise<Medication[]> {

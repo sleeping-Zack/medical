@@ -43,6 +43,13 @@ class SmsCodeLogRepository:
         self.db.add(log)
         self.db.commit()
 
+    def delete_by_id(self, log_id: int) -> None:
+        log = self.db.get(SmsCodeLog, log_id)
+        if not log:
+            return
+        self.db.delete(log)
+        self.db.commit()
+
     def latest_unused(self, *, phone: str, scene: str) -> Optional[SmsCodeLog]:
         now = datetime.now(timezone.utc)
         stmt = (

@@ -59,4 +59,5 @@ class UserMe(BaseModel):
     id: int
     phone: str
     role: str
+    short_id: str = Field(default="", description="6 位绑定短号，长辈端展示给家属用于绑定")
 

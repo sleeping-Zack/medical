@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# 本地数据库导出（勿提交）
+production_stack/backups/

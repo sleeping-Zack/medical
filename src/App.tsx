@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
+import React, { useState, useEffect, useMemo, Component, ErrorInfo, ReactNode } from 'react';
 import { 
   LayoutDashboard, 
   Pill, 
@@ -10,11 +10,9 @@ import {
   ChevronRight,
   Plus,
   ArrowLeft,
-  Camera,
   CheckCircle2,
   Clock,
   AlertCircle,
-  History,
   LogOut,
   ShieldAlert,
   Download,
@@ -23,16 +21,14 @@ import {
   TrendingUp,
   Check
 } from 'lucide-react';
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
   AreaChart,
-  Area
+  Area,
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiError, getAccessToken, getRefreshToken, clearTokenPair } from './lib/api';
@@ -42,6 +38,7 @@ import { UserRole, UserProfile, Medication, MedicationPlan, ReminderEvent, Elder
 import { MedicationForm } from './components/MedicationForm';
 import { PlanForm } from './components/PlanForm';
 import { AuthScreen } from './components/AuthScreen';
+import { ElderHomeView } from './components/ElderHomeView';
 import { getProfileFromRegistry, medicationService, syncProfileToRegistry } from './services/medicationService';
 
 /** 已登录用户（对接 JWT 后端，uid 为后端用户数字 id 的字符串） */
@@ -281,6 +278,8 @@ function AppContent() {
   const [reminders, setReminders] = useState<ReminderEvent[]>([]);
   const [bindings, setBindings] = useState<ElderBinding[]>([]);
   const [boundUsers, setBoundUsers] = useState<Record<string, UserProfile>>({});
+  /** 看护人模式下：药品/计划/今日日程对应的用户（本人 uid 或已绑定长辈的 elderUserId） */
+  const [careTargetUserId, setCareTargetUserId] = useState('');
   const [showMedForm, setShowMedForm] = useState(false);
   const [showPlanForm, setShowPlanForm] = useState(false);
   const [isCreatingPlan, setIsCreatingPlan] = useState(false);
@@ -292,31 +291,46 @@ function AppContent() {
   const [isConfirmingIntake, setIsConfirmingIntake] = useState(false);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
 
+  // 到点弹窗：subscribeToTodayReminders 每 3s 会 setReminders 产生新引用，若仅依赖 setInterval(5s)
+  // 则 effect 每次都会 clear 定时器，5s 内又被重置，回调几乎永不执行 → 表现为「到点不提醒」。
+  // 到点弹窗：仅提醒「属于当前登录账号本人」的日程。看护人为长辈代建的提醒 targetUserId 为长辈 uid，
+  // 不应在看护端弹窗，只应在长辈本人登录（老人模式）时弹出。
   useEffect(() => {
-    const interval = setInterval(() => {
+    const checkDue = () => {
       const now = new Date();
-      const due = reminders.find(r => {
+      const due = reminders.find((r) => {
+        if (!user || r.targetUserId !== user.uid) return false;
         const isPending = r.status === 'pending';
         const isNotDismissed = !dismissedReminderIds.has(r.id);
         const isDue = new Date(r.dueTime) <= now;
-        // 原 2 小时过短，稍晚打开页面会永远不弹；改为到点后 24 小时内仍可弹出
         const isNotTooOld =
           now.getTime() - new Date(r.dueTime).getTime() < 24 * 60 * 60 * 1000;
-        
-        // Check if it was snoozed and if the snooze time has passed
         const snoozeTime = snoozedReminders.get(r.id);
         const isSnoozeOver = !snoozeTime || now.getTime() > snoozeTime;
-
         return isPending && isNotDismissed && isDue && isNotTooOld && isSnoozeOver;
       });
-      
-      if (due && (!activeReminder || activeReminder.id !== due.id)) {
-        setActiveReminder(due);
-      }
-    }, 5000);
 
-    return () => clearInterval(interval);
-  }, [reminders, activeReminder, dismissedReminderIds, snoozedReminders]);
+      setActiveReminder((prev) => {
+        if (!due) {
+          if (prev && user && prev.targetUserId !== user.uid) return null;
+          return prev;
+        }
+        if (prev?.id === due.id) return prev;
+        return due;
+      });
+    };
+
+    checkDue();
+    const interval = window.setInterval(checkDue, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkDue();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [reminders, dismissedReminderIds, snoozedReminders, user]);
 
   useEffect(() => {
     if (profile) {
@@ -325,25 +339,63 @@ function AppContent() {
   }, [profile]);
 
   useEffect(() => {
-    if (user) {
-      loadMedications();
-      loadPlans();
-      const unsubscribe = medicationService.subscribeToTodayReminders(user.uid, (events) => {
-        setReminders(events);
-      });
-      return () => unsubscribe();
+    if (!user) {
+      setCareTargetUserId('');
+      return;
     }
-  }, [user]);
+    setCareTargetUserId(user.uid);
+  }, [user?.uid]);
+
+  const dataUserId = !user ? '' : currentMode === 'elder' ? user.uid : careTargetUserId || user.uid;
+
+  const careTargetOptions = useMemo(() => {
+    if (!user) return [] as { id: string; label: string }[];
+    const opts: { id: string; label: string }[] = [
+      { id: user.uid, label: `本人（${profile?.displayName?.trim() || '我'}）` },
+    ];
+    for (const b of bindings) {
+      const bu = boundUsers[b.elderUserId];
+      opts.push({
+        id: b.elderUserId,
+        label: bu?.displayName
+          ? `${bu.displayName}（家人）`
+          : `家人 · 短号 ${bu?.shortId || '未知'}`,
+      });
+    }
+    return opts;
+  }, [user, profile?.displayName, bindings, boundUsers]);
+
+  useEffect(() => {
+    if (!user || !dataUserId) {
+      if (!user) {
+        setMedications([]);
+        setPlans([]);
+        setReminders([]);
+      }
+      return;
+    }
+    const load = async () => {
+      const meds = await medicationService.getMedications(dataUserId);
+      setMedications(meds);
+      const pls = await medicationService.getPlans(dataUserId);
+      setPlans(pls);
+    };
+    void load();
+    const unsubscribe = medicationService.subscribeToTodayReminders(dataUserId, (events) => {
+      setReminders(events);
+    });
+    return () => unsubscribe();
+  }, [user, dataUserId]);
 
   const loadMedications = async () => {
-    if (!user) return;
-    const meds = await medicationService.getMedications(user.uid);
+    if (!user || !dataUserId) return;
+    const meds = await medicationService.getMedications(dataUserId);
     setMedications(meds);
   };
 
   const loadPlans = async () => {
-    if (!user) return;
-    const data = await medicationService.getPlans(user.uid);
+    if (!user || !dataUserId) return;
+    const data = await medicationService.getPlans(dataUserId);
     setPlans(data);
   };
 
@@ -385,9 +437,10 @@ function AppContent() {
         await medicationService.updateMedication(editingMed.id, data);
         setNotification({ message: '药品修改成功！', type: 'success' });
       } else {
+        const targetUid = careTargetUserId || user.uid;
         await medicationService.addMedication({
           ...data,
-          targetUserId: user.uid,
+          targetUserId: targetUid,
           createdByUserId: user.uid,
           archived: false
         });
@@ -430,9 +483,10 @@ function AppContent() {
     if (!user) return;
     setIsCreatingPlan(true);
     try {
+      const targetUid = (data.targetUserId as string) || careTargetUserId || user.uid;
       await medicationService.addMedicationPlan({
         ...data,
-        targetUserId: user.uid,
+        targetUserId: targetUid,
         createdByUserId: user.uid,
         status: 'active'
       });
@@ -449,17 +503,17 @@ function AppContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
-        <motion.div 
+      <div className="min-h-screen bg-gradient-to-b from-[#FFE8DC] via-[#FFF0E6] to-[#FFFBF5] flex flex-col items-center justify-center p-4">
+        <motion.div
           initial={{ scale: 0.8, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           className="flex flex-col items-center"
         >
-          <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-200">
+          <div className="w-16 h-16 bg-[#E8863D] rounded-[22px] flex items-center justify-center mb-4 shadow-lg shadow-orange-900/15">
             <Pill className="text-white w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">用药提醒</h1>
-          <p className="text-slate-500 mt-2">正在加载您的健康面板...</p>
+          <h1 className="text-2xl font-black text-[#5C4A3D]">药安心</h1>
+          <p className="text-[#8B7A6E] font-medium mt-2">正在为您准备好页面…</p>
         </motion.div>
       </div>
     );
@@ -502,10 +556,14 @@ function AppContent() {
   }
 
   return (
-    <div className={cn(
-      "min-h-screen flex flex-col transition-all duration-300",
-      currentMode === 'elder' ? "bg-orange-50" : "bg-slate-50"
-    )}>
+    <div
+      className={cn(
+        'min-h-screen flex flex-col transition-all duration-300',
+        currentMode === 'elder' || currentMode === 'caregiver'
+          ? 'bg-gradient-to-b from-[#FFE8DC] via-[#FFF0E6] to-[#FFFBF5]'
+          : 'bg-slate-50',
+      )}
+    >
       {/* Due Reminder Overlay/Modal */}
       <AnimatePresence>
         {activeReminder && (
@@ -515,23 +573,29 @@ function AppContent() {
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.9, opacity: 0, y: 20 }}
               className={cn(
-                "w-full max-w-sm p-8 rounded-[40px] shadow-2xl text-center space-y-6",
-                currentMode === 'elder' ? "bg-orange-600 text-white" : "bg-white text-slate-900"
+                'w-full max-w-sm p-8 rounded-[40px] shadow-2xl text-center space-y-6 border-2',
+                currentMode === 'elder'
+                  ? 'bg-[#E8863D] text-white border-white/20'
+                  : 'bg-gradient-to-br from-[#FFF8F0] to-[#FFE4CC] text-[#5C4A3D] border-[#FFB366]/40',
               )}
             >
-              <div className={cn(
-                "w-20 h-20 rounded-full flex items-center justify-center mx-auto animate-bounce",
-                currentMode === 'elder' ? "bg-white/20" : "bg-blue-100"
-              )}>
-                <Bell className={cn("w-10 h-10", currentMode === 'elder' ? "text-white" : "text-blue-600")} />
+              <div
+                className={cn(
+                  'w-20 h-20 rounded-full flex items-center justify-center mx-auto animate-bounce',
+                  currentMode === 'elder' ? 'bg-white/20' : 'bg-[#E8863D]/15',
+                )}
+              >
+                <Bell className={cn('w-10 h-10', currentMode === 'elder' ? 'text-white' : 'text-[#E8863D]')} />
               </div>
               
               <div className="space-y-2">
                 <h2 className="text-3xl font-black">该吃药了！</h2>
-                <p className={cn(
-                  "text-lg font-medium opacity-80",
-                  currentMode === 'elder' ? "text-white" : "text-slate-500"
-                )}>
+                <p
+                  className={cn(
+                    'text-lg font-medium',
+                    currentMode === 'elder' ? 'text-white/90' : 'text-[#8B7A6E]',
+                  )}
+                >
                   设定时间: {new Date(activeReminder.dueTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}
                 </p>
               </div>
@@ -554,10 +618,12 @@ function AppContent() {
                     }
                   }}
                   className={cn(
-                    "w-full py-5 rounded-3xl text-xl font-bold shadow-lg active:scale-95 transition-all flex items-center justify-center space-x-2",
-                    isConfirmingIntake 
-                      ? "bg-slate-200 text-slate-400 cursor-not-allowed" 
-                      : (currentMode === 'elder' ? "bg-white text-orange-600 shadow-orange-900/20" : "bg-blue-600 text-white shadow-blue-200")
+                    'w-full py-5 rounded-3xl text-xl font-bold shadow-lg active:scale-95 transition-all flex items-center justify-center space-x-2',
+                    isConfirmingIntake
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : currentMode === 'elder'
+                        ? 'bg-white text-[#E8863D] shadow-orange-900/20'
+                        : 'bg-[#7CB87C] text-white shadow-[#7CB87C]/30',
                   )}
                 >
                   {isConfirmingIntake ? (
@@ -580,9 +646,11 @@ function AppContent() {
                     setActiveReminder(null);
                   }}
                   className={cn(
-                    "w-full py-4 rounded-3xl text-lg font-bold active:scale-95 transition-all",
-                    currentMode === 'elder' ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600",
-                    isConfirmingIntake && "opacity-50 cursor-not-allowed"
+                    'w-full py-4 rounded-3xl text-lg font-bold active:scale-95 transition-all',
+                    currentMode === 'elder'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[#B8D4E8]/80 text-[#5C4A3D]',
+                    isConfirmingIntake && 'opacity-50 cursor-not-allowed',
                   )}
                 >
                   10分钟后再说
@@ -593,35 +661,38 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      {/* Header */}
-      <header className={cn(
-        "px-6 py-4 flex items-center justify-between sticky top-0 z-10 backdrop-blur-md",
-        currentMode === 'elder' ? "bg-orange-50/80" : "bg-slate-50/80"
-      )}>
-        <div className="flex items-center space-x-2">
-          <div className={cn(
-            "w-10 h-10 rounded-xl flex items-center justify-center shadow-sm",
-            currentMode === 'elder' ? "bg-orange-600" : "bg-blue-600"
-          )}>
-            <Pill className="text-white w-6 h-6" />
+      {/* Header（长辈模式由 ElderHomeView 自带顶栏，避免重复） */}
+      {currentMode !== 'elder' && (
+        <header className="px-5 py-3.5 flex items-center justify-between sticky top-0 z-10 backdrop-blur-md bg-[#FFFBF5]/90 border-b border-[#FFE4CC]/80 shadow-sm shadow-amber-900/5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-11 h-11 rounded-2xl flex items-center justify-center shadow-md bg-[#E8863D] shadow-orange-900/15">
+              <Pill className="text-white w-6 h-6" />
+            </div>
+            <div>
+              <span className="text-xl font-black tracking-tight text-[#5C4A3D]">药安心</span>
+              <p className="text-[13px] font-semibold text-[#8B7A6E] leading-tight">看护端 · 陪家人好好吃药</p>
+            </div>
           </div>
-          <span className="text-xl font-bold tracking-tight">用药提醒</span>
-        </div>
-        <div className="flex items-center space-x-3">
-          <button className="p-2 rounded-full hover:bg-slate-200 transition-colors relative">
-            <Bell className="w-6 h-6 text-slate-600" />
-            {reminders.some(r => r.status === 'pending') && (
-              <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
-            )}
-          </button>
-          <button 
-            onClick={() => setView('settings')}
-            className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border-2 border-transparent hover:border-blue-500 transition-all"
-          >
-            <UserCircle className="w-8 h-8 text-slate-400" />
-          </button>
-        </div>
-      </header>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="p-2.5 rounded-full hover:bg-[#FFE4CC]/60 transition-colors relative text-[#5C4A3D]"
+            >
+              <Bell className="w-6 h-6" />
+              {reminders.some((r) => r.status === 'pending' && r.targetUserId === user?.uid) && (
+                <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-[#FFFBF5]" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('settings')}
+              className="w-11 h-11 rounded-full bg-white border-2 border-[#FFE4CC] flex items-center justify-center shadow-sm hover:border-[#E8863D]/50 transition-all"
+            >
+              <UserCircle className="w-7 h-7 text-[#8B7A6E]" />
+            </button>
+          </div>
+        </header>
+      )}
 
       {/* Notification Toast */}
       <AnimatePresence>
@@ -632,10 +703,14 @@ function AppContent() {
             exit={{ y: -100, opacity: 0 }}
             className="fixed top-0 left-0 right-0 z-[100] flex justify-center pointer-events-none"
           >
-            <div className={cn(
-              "px-6 py-3 rounded-2xl shadow-lg font-bold flex items-center space-x-2 pointer-events-auto",
-              notification.type === 'success' ? "bg-green-600 text-white" : "bg-red-600 text-white"
-            )}>
+            <div
+              className={cn(
+                'px-6 py-3 rounded-2xl shadow-lg font-bold flex items-center space-x-2 pointer-events-auto border border-white/20',
+                notification.type === 'success'
+                  ? 'bg-[#7CB87C] text-white shadow-[#7CB87C]/25'
+                  : 'bg-red-600 text-white',
+              )}
+            >
               {notification.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
               <span>{notification.message}</span>
             </div>
@@ -644,7 +719,12 @@ function AppContent() {
       </AnimatePresence>
 
       {/* Main Content */}
-      <main className="flex-1 px-6 py-4 pb-24 overflow-y-auto">
+      <main
+        className={cn(
+          'flex-1 overflow-y-auto max-w-lg mx-auto w-full',
+          currentMode === 'elder' ? 'px-4 py-3 pb-8' : 'px-4 py-4 pb-28',
+        )}
+      >
         <AnimatePresence mode="wait">
           {currentMode === 'caregiver' ? (
             <CaregiverView 
@@ -666,9 +746,28 @@ function AppContent() {
               bindings={bindings}
               boundUsers={boundUsers}
               user={user}
+              profile={profile}
+              careTargetUserId={careTargetUserId || user.uid}
+              onCareTargetUserIdChange={setCareTargetUserId}
+              careTargetOptions={careTargetOptions}
+              onManageElderMedication={(elderUserId: string) => {
+                setCareTargetUserId(elderUserId);
+                setView('medicines');
+              }}
             />
           ) : (
-            <ElderView view={view} setView={setView} reminders={reminders} user={user} profile={profile} updateProfile={updateProfile} />
+            <ElderHomeView
+              user={user}
+              profile={profile}
+              reminders={reminders.filter((r) => r.targetUserId === user.uid)}
+              plans={plans}
+              snoozedReminders={snoozedReminders}
+              setSnoozedReminders={setSnoozedReminders}
+              onConfirmIntake={(id) => medicationService.confirmIntake(id, user.uid)}
+              setNotification={setNotification}
+              setView={setView}
+              onLogout={logout}
+            />
           )}
         </AnimatePresence>
       </main>
@@ -686,6 +785,10 @@ function AppContent() {
                 }} 
                 loading={isSavingMed}
                 initialData={editingMed}
+                careTargetUserId={careTargetUserId || user.uid}
+                onCareTargetUserIdChange={setCareTargetUserId}
+                careTargetOptions={careTargetOptions}
+                showTargetPicker={!editingMed}
               />
             </motion.div>
           </div>
@@ -698,6 +801,9 @@ function AppContent() {
                 onSave={handleCreatePlan} 
                 onCancel={() => setShowPlanForm(false)} 
                 loading={isCreatingPlan}
+                careTargetUserId={careTargetUserId || user.uid}
+                onCareTargetUserIdChange={setCareTargetUserId}
+                careTargetOptions={careTargetOptions}
               />
             </motion.div>
           </div>
@@ -764,11 +870,13 @@ function AppContent() {
 
       {/* Bottom Navigation (Caregiver only) */}
       {currentMode === 'caregiver' && (
-        <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-100 px-6 py-3 flex items-center justify-between z-20">
-          <NavButton active={view === 'home'} icon={LayoutDashboard} label="首页" onClick={() => setView('home')} />
-          <NavButton active={view === 'medicines'} icon={Pill} label="药品" onClick={() => setView('medicines')} />
-          <NavButton active={view === 'plans'} icon={Calendar} label="计划" onClick={() => setView('plans')} />
-          <NavButton active={view === 'bindings'} icon={Users} label="家人" onClick={() => setView('bindings')} />
+        <nav className="fixed bottom-0 left-0 right-0 z-20 flex justify-center pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-lg mx-4 mb-3 rounded-[28px] bg-[#FFFBF5]/95 border border-[#FFE4CC] shadow-lg shadow-amber-900/10 px-4 py-3 flex items-center justify-between backdrop-blur-md">
+            <NavButton active={view === 'home'} icon={LayoutDashboard} label="首页" onClick={() => setView('home')} />
+            <NavButton active={view === 'medicines'} icon={Pill} label="药品" onClick={() => setView('medicines')} />
+            <NavButton active={view === 'plans'} icon={Calendar} label="计划" onClick={() => setView('plans')} />
+            <NavButton active={view === 'bindings'} icon={Users} label="家人" onClick={() => setView('bindings')} />
+          </div>
         </nav>
       )}
 
@@ -778,30 +886,32 @@ function AppContent() {
           <motion.div 
             initial={{ y: 100 }}
             animate={{ y: 0 }}
-            className="bg-white w-full max-w-md rounded-3xl p-6 space-y-6"
+            className="bg-gradient-to-b from-[#FFFBF5] to-[#FFF8F0] w-full max-w-md rounded-[28px] p-6 space-y-6 border border-[#FFE4CC] shadow-xl shadow-amber-900/10"
           >
             <div className="flex justify-between items-center">
-              <h2 className="text-xl font-bold">设置</h2>
-              <button onClick={() => setView('home')} className="p-2 hover:bg-slate-100 rounded-full">
-                <Plus className="w-6 h-6 rotate-45" />
+              <h2 className="text-xl font-black text-[#5C4A3D]">设置</h2>
+              <button onClick={() => setView('home')} className="p-2 hover:bg-[#FFE4CC]/50 rounded-full">
+                <Plus className="w-6 h-6 rotate-45 text-[#8B7A6E]" />
               </button>
             </div>
             
             <div className="space-y-4">
-              <div className="p-4 bg-slate-50 rounded-2xl flex items-center justify-between">
+              <div className="p-4 bg-white/90 rounded-[22px] border border-[#FFE4CC] shadow-sm flex items-center justify-between">
                 <div>
-                  <h3 className="font-semibold">应用模式</h3>
-                  <p className="text-sm text-slate-500">在看护人和老人视图之间切换</p>
+                  <h3 className="font-bold text-[#5C4A3D]">应用模式</h3>
+                  <p className="text-sm text-[#8B7A6E]">在看护人和长辈视图之间切换</p>
                 </div>
-                <div className="flex bg-slate-200 p-1 rounded-xl">
+                <div className="flex bg-[#FFF8F0] p-1 rounded-xl border border-[#FFE4CC]">
                   <button 
                     onClick={() => {
                       setCurrentMode('caregiver');
                       updateProfile({ defaultMode: 'caregiver' });
                     }}
                     className={cn(
-                      "px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
-                      currentMode === 'caregiver' ? "bg-white shadow-sm text-blue-600" : "text-slate-600"
+                      'px-3 py-1.5 rounded-lg text-sm font-bold transition-all',
+                      currentMode === 'caregiver'
+                        ? 'bg-white shadow text-[#E8863D]'
+                        : 'text-[#8B7A6E]',
                     )}
                   >
                     看护人
@@ -812,50 +922,50 @@ function AppContent() {
                       updateProfile({ defaultMode: 'elder' });
                     }}
                     className={cn(
-                      "px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
-                      currentMode === 'elder' ? "bg-white shadow-sm text-orange-600" : "text-slate-600"
+                      'px-3 py-1.5 rounded-lg text-sm font-bold transition-all',
+                      currentMode === 'elder' ? 'bg-white shadow text-[#E8863D]' : 'text-[#8B7A6E]',
                     )}
                   >
-                    老人
+                    长辈
                   </button>
                 </div>
               </div>
 
-              <div className="p-4 bg-slate-50 rounded-2xl space-y-4">
-                <h3 className="font-semibold">个人信息</h3>
+              <div className="p-4 bg-white/90 rounded-[22px] border border-[#FFE4CC] shadow-sm space-y-4">
+                <h3 className="font-bold text-[#5C4A3D]">个人信息</h3>
                 <div className="space-y-2">
-                  <label className="text-sm text-slate-500">我的 6 位 ID</label>
-                  <div className="w-full px-4 py-3 rounded-xl bg-slate-200 text-slate-700 font-mono tracking-widest font-bold">
+                  <label className="text-sm font-semibold text-[#8B7A6E]">我的 6 位 ID</label>
+                  <div className="w-full px-4 py-3 rounded-xl bg-[#FFF8F0] text-[#5C4A3D] font-mono tracking-widest font-black border border-[#FFE4CC]">
                     {profile?.shortId || '---'}
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm text-slate-500">手机号 (用于家人绑定验证)</label>
+                  <label className="text-sm font-semibold text-[#8B7A6E]">手机号 (用于家人绑定验证)</label>
                   <input 
                     type="tel" 
                     value={profile?.phone || ''}
                     onChange={(e) => updateProfile({ phone: e.target.value })}
                     placeholder="请输入手机号"
-                    className="w-full px-4 py-3 rounded-xl bg-white border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-4 py-3 rounded-xl bg-white border border-[#FFE4CC] outline-none focus:ring-2 focus:ring-[#E8863D]/40"
                   />
                 </div>
               </div>
 
-              <div className="p-4 bg-slate-50 rounded-2xl space-y-4">
-                <h3 className="font-semibold">辅助功能</h3>
+              <div className="p-4 bg-white/90 rounded-[22px] border border-[#FFE4CC] shadow-sm space-y-4">
+                <h3 className="font-bold text-[#5C4A3D]">辅助功能</h3>
                 <div className="flex items-center justify-between">
                   <span className="text-sm">字体大小</span>
                   <input type="range" min="1" max="1.8" step="0.1" className="w-32" />
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm">语音提醒</span>
-                  <div className="w-12 h-6 bg-blue-600 rounded-full relative">
-                    <div className="absolute right-1 top-1 w-4 h-4 bg-white rounded-full"></div>
+                  <span className="text-sm text-[#5C4A3D]">语音提醒</span>
+                  <div className="w-12 h-6 bg-[#7CB87C] rounded-full relative">
+                    <div className="absolute right-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm" />
                   </div>
                 </div>
                 <button 
                   onClick={() => setShowInstallGuide(true)}
-                  className="w-full py-2 bg-slate-100 text-slate-600 rounded-xl text-sm font-bold hover:bg-slate-200 transition-colors flex items-center justify-center space-x-2"
+                  className="w-full py-2.5 bg-[#FFF8F0] text-[#5C4A3D] rounded-xl text-sm font-bold hover:bg-[#FFE4CC]/80 transition-colors flex items-center justify-center gap-2 border border-[#FFE4CC]"
                 >
                   <Download className="w-4 h-4" />
                   <span>下载/安装到手机桌面</span>
@@ -866,7 +976,7 @@ function AppContent() {
                     setNotification({ message: '测试提醒已发出，5秒后弹出', type: 'success' });
                     setView('home');
                   }}
-                  className="w-full py-2 bg-blue-50 text-blue-600 rounded-xl text-sm font-bold hover:bg-blue-100 transition-colors"
+                  className="w-full py-2.5 bg-[#E8863D]/12 text-[#C96D2E] rounded-xl text-sm font-bold hover:bg-[#E8863D]/20 transition-colors border border-[#FFB366]/50"
                 >
                   发送测试提醒 (5秒后)
                 </button>
@@ -874,7 +984,7 @@ function AppContent() {
 
               <button 
                 onClick={logout}
-                className="w-full py-4 text-red-600 font-semibold border border-red-100 rounded-2xl hover:bg-red-50 transition-colors flex items-center justify-center space-x-2"
+                className="w-full py-4 text-red-700 font-bold border border-red-100 rounded-[22px] hover:bg-red-50 transition-colors flex items-center justify-center gap-2 bg-white/80"
               >
                 <LogOut className="w-5 h-5" />
                 <span>退出登录</span>
@@ -897,15 +1007,18 @@ export default function App() {
 
 function NavButton({ active, icon: Icon, label, onClick }: { active: boolean, icon: any, label: string, onClick: () => void }) {
   return (
-    <button 
+    <button
+      type="button"
       onClick={onClick}
       className={cn(
-        "flex flex-col items-center space-y-1 transition-all",
-        active ? "text-blue-600" : "text-slate-400"
+        'flex flex-col items-center gap-1 transition-all min-w-[52px] active:scale-95',
+        active ? 'text-[#E8863D]' : 'text-[#8B7A6E]',
       )}
     >
-      <Icon className={cn("w-6 h-6", active && "fill-blue-50")} />
-      <span className="text-[10px] font-medium uppercase tracking-wider">{label}</span>
+      <span className={cn('p-2 rounded-2xl transition-colors', active ? 'bg-[#FFE4CC]/90 shadow-sm' : 'bg-transparent')}>
+        <Icon className="w-6 h-6" strokeWidth={active ? 2.25 : 2} />
+      </span>
+      <span className="text-[11px] font-bold">{label}</span>
     </button>
   );
 }
@@ -925,7 +1038,12 @@ function CaregiverView({
   onBindElder,
   bindings = [],
   boundUsers = {},
-  user 
+  user,
+  careTargetUserId,
+  onCareTargetUserIdChange,
+  careTargetOptions = [],
+  onManageElderMedication,
+  profile,
 }: any) {
   const [bindShortId, setBindShortId] = useState('');
   const [bindPhoneLast4, setBindPhoneLast4] = useState('');
@@ -952,175 +1070,239 @@ function CaregiverView({
     };
   });
 
+  const careTargetLabel =
+    careTargetOptions.find((o: any) => o.id === careTargetUserId)?.label || '本人';
+
+  const showCareTargetBar = view === 'home' || view === 'medicines' || view === 'plans';
+
   return (
     <motion.div 
       key="caregiver"
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -10 }}
-      className="space-y-6"
+      className="space-y-5 w-full"
     >
+      {showCareTargetBar && (
+        <div className="bg-white/95 p-5 rounded-[26px] border border-[#FFE4CC] shadow-lg shadow-amber-900/8 space-y-3">
+          <label className="block text-sm font-extrabold text-[#5C4A3D]">当前关心的人</label>
+          <p className="text-sm text-[#8B7A6E] leading-relaxed">
+            切换后，首页日程、药品与计划都会跟着变；可以管自己，也可以帮已绑定的长辈远程打理。
+          </p>
+          <select
+            value={careTargetUserId}
+            onChange={(e) => onCareTargetUserIdChange(e.target.value)}
+            className="w-full px-4 py-3.5 rounded-[18px] border border-[#FFE4CC] bg-[#FFF8F0] font-bold text-[#5C4A3D] outline-none focus:ring-2 focus:ring-[#E8863D]/35"
+          >
+            {careTargetOptions.map((o: any) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-sm font-semibold text-[#8FA894]">现在在看：<span className="text-[#E8863D]">{careTargetLabel}</span></p>
+        </div>
+      )}
+
       {view === 'home' && (
         <>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-2xl font-bold text-slate-900">您好，{user.displayName?.split(' ')[0]}</h2>
-              <p className="text-slate-500">这是您家人的健康状况</p>
+              <h2 className="text-2xl font-black text-[#5C4A3D]">
+                您好，{(profile?.displayName || '家人').split(/\s+/)[0]}
+              </h2>
+              <p className="text-[#8B7A6E] text-base font-medium mt-1">今天也一起把用药安排得明明白白 💛</p>
             </div>
-            <div className="flex -space-x-2">
-              <div className="w-8 h-8 rounded-full bg-blue-100 border-2 border-white flex items-center justify-center text-[10px] font-bold text-blue-600 uppercase">{user.displayName?.substr(0, 2)}</div>
-            </div>
-          </div>
-
-          {/* Stats Grid */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
-              <div className="w-10 h-10 bg-green-50 rounded-2xl flex items-center justify-center mb-3">
-                <CheckCircle2 className="text-green-600 w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">
-                {reminders.length > 0 
-                  ? Math.round((reminders.filter(r => r.status === 'taken').length / reminders.length) * 100) 
-                  : 0}%
-              </div>
-              <div className="text-xs text-slate-500 uppercase tracking-wider font-semibold">服药率</div>
-            </div>
-            <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
-              <div className="w-10 h-10 bg-amber-50 rounded-2xl flex items-center justify-center mb-3">
-                <AlertCircle className="text-amber-600 w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">{reminders.filter((r: any) => r.status === 'pending').length}</div>
-              <div className="text-xs text-slate-500 uppercase tracking-wider font-semibold">待处理</div>
+            <div className="w-12 h-12 rounded-full bg-[#FFE4CC] border-2 border-white shadow-md flex items-center justify-center text-sm font-black text-[#E8863D]">
+              {(profile?.displayName || '我').slice(0, 2)}
             </div>
           </div>
 
-          {/* Today's Reminders */}
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-lg">今日日程</h3>
-              <button className="text-blue-600 text-sm font-semibold">查看全部</button>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-white/95 p-4 rounded-[26px] shadow-md border border-[#FFE4CC]/80">
+              <div className="w-11 h-11 bg-[#7CB87C]/20 rounded-2xl flex items-center justify-center mb-3">
+                <CheckCircle2 className="text-[#5a9a5a] w-6 h-6" />
+              </div>
+              <div className="text-3xl font-black text-[#5C4A3D]">
+                {reminders.length > 0
+                  ? Math.round((reminders.filter((r) => r.status === 'taken').length / reminders.length) * 100)
+                  : 0}
+                %
+              </div>
+              <div className="text-sm text-[#8B7A6E] font-bold mt-1">今日完成度</div>
+            </div>
+            <div className="bg-white/95 p-4 rounded-[26px] shadow-md border border-[#FFE4CC]/80">
+              <div className="w-11 h-11 bg-[#F4C95D]/35 rounded-2xl flex items-center justify-center mb-3">
+                <AlertCircle className="text-[#C96D2E] w-6 h-6" />
+              </div>
+              <div className="text-3xl font-black text-[#5C4A3D]">
+                {reminders.filter((r: any) => r.status === 'pending').length}
+              </div>
+              <div className="text-sm text-[#8B7A6E] font-bold mt-1">还有待确认</div>
+            </div>
+          </div>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <h3 className="font-extrabold text-lg text-[#5C4A3D]">今日日程</h3>
+              <span className="text-sm font-semibold text-[#8FA894]">按时间排好了</span>
             </div>
             <div className="space-y-3">
-              {reminders.length > 0 ? reminders.map((rem: any) => (
-                <div key={rem.id} className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100 flex items-center justify-between group overflow-hidden relative">
-                  <div className="flex items-center space-x-4 z-10">
-                    <div className={cn(
-                      "w-12 h-12 rounded-2xl flex items-center justify-center transition-colors",
-                      rem.status === 'taken' ? "bg-green-50" : "bg-slate-50"
-                    )}>
-                      <Pill className={cn("w-6 h-6", rem.status === 'taken' ? "text-green-600" : "text-slate-400")} />
+              {reminders.length > 0 ? (
+                reminders.map((rem: any) => (
+                  <div
+                    key={rem.id}
+                    className="bg-white/95 p-4 rounded-[24px] shadow-md border border-[#FFE4CC]/70 flex items-center justify-between gap-2"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={cn(
+                          'w-12 h-12 rounded-2xl flex items-center justify-center shrink-0',
+                          rem.status === 'taken' ? 'bg-[#7CB87C]/20' : 'bg-[#FFF8F0]',
+                        )}
+                      >
+                        <Pill
+                          className={cn('w-6 h-6', rem.status === 'taken' ? 'text-[#5a9a5a]' : 'text-[#E8863D]')}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="font-bold text-[#5C4A3D] truncate">
+                          {rem.medicineName && rem.medicineName !== '药品'
+                            ? rem.medicineName
+                            : medications.find(
+                                (m: any) =>
+                                  m.id === plans.find((p: any) => p.id === rem.planId)?.medicineId,
+                              )?.name || '药品'}
+                        </h4>
+                        <div className="flex items-center text-sm text-[#8B7A6E] font-semibold mt-0.5">
+                          <Clock className="w-3.5 h-3.5 mr-1 shrink-0" />
+                          {new Date(rem.dueTime).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            hour12: false,
+                          })}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="font-bold">
-                        {(rem.medicineName && rem.medicineName !== '药品') 
-                          ? rem.medicineName 
-                          : (medications.find((m: any) => m.id === (plans.find((p: any) => p.id === rem.planId)?.medicineId))?.name || '药品')}
-                      </h4>
-                      <div className="flex items-center text-xs text-slate-500 space-x-2">
-                        <span className="flex items-center"><Clock className="w-3 h-3 mr-1" /> {new Date(rem.dueTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {rem.status === 'pending' && (
+                        <button
+                          type="button"
+                          onClick={() => onConfirmIntake(rem.id)}
+                          className="p-2.5 bg-[#7CB87C]/20 text-[#3d7a3d] rounded-xl hover:bg-[#7CB87C]/30 transition-colors"
+                          title="确认已吃"
+                        >
+                          <Check className="w-5 h-5" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onDeleteReminder(rem.id)}
+                        className="p-2.5 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors"
+                        title="删除日程"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                      <div
+                        className={cn(
+                          'px-2.5 py-1 rounded-full text-xs font-bold ml-1',
+                          rem.status === 'taken' ? 'bg-[#7CB87C] text-white' : 'bg-[#FFE4CC] text-[#8B4513]',
+                        )}
+                      >
+                        {rem.status === 'taken' ? '已服' : '待服'}
                       </div>
                     </div>
                   </div>
-                  
-                  <div className="flex items-center space-x-2 z-10">
-                    {rem.status === 'pending' && (
-                      <button 
-                        onClick={() => onConfirmIntake(rem.id)}
-                        className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
-                        title="确认已吃"
-                      >
-                        <Check className="w-5 h-5" />
-                      </button>
-                    )}
-                    <button 
-                      onClick={() => onDeleteReminder(rem.id)}
-                      className="p-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors"
-                      title="删除日程"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                    <div className={cn(
-                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ml-2",
-                      rem.status === 'taken' ? "bg-green-500 text-white" : "bg-blue-50 text-blue-600"
-                    )}>
-                      {rem.status === 'taken' ? '已服用' : '待服用'}
-                    </div>
-                  </div>
-                </div>
-              )) : (
-                <div className="bg-white p-8 rounded-3xl border border-dashed border-slate-200 text-center">
-                  <p className="text-slate-400 text-sm">今日暂无提醒</p>
+                ))
+              ) : (
+                <div className="bg-white/90 p-8 rounded-[26px] border border-dashed border-[#FFB366]/50 text-center">
+                  <p className="text-[#8B7A6E] font-medium">今天还没有提醒，加个计划或药品吧～</p>
                 </div>
               )}
             </div>
           </section>
 
-          {/* Quick Actions */}
-          <div className="grid grid-cols-2 gap-4">
-            <button 
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
               onClick={onAddMed}
-              className="bg-blue-600 p-4 rounded-3xl shadow-lg shadow-blue-100 text-white flex flex-col items-start space-y-2"
+              className="bg-gradient-to-br from-[#E8863D] to-[#d97830] p-5 rounded-[26px] shadow-lg shadow-orange-900/15 text-white flex flex-col items-start gap-2 active:scale-[0.98] transition-transform"
             >
-              <Plus className="w-6 h-6" />
-              <span className="font-bold">添加药品</span>
+              <Plus className="w-7 h-7" />
+              <span className="font-extrabold text-lg">添加药品</span>
             </button>
-            <button 
+            <button
+              type="button"
               onClick={onAddPlan}
-              className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100 text-slate-900 flex flex-col items-start space-y-2"
+              className="bg-white/95 p-5 rounded-[26px] shadow-md border border-[#FFE4CC] text-[#5C4A3D] flex flex-col items-start gap-2 active:scale-[0.98] transition-transform"
             >
-              <Calendar className="w-6 h-6 text-blue-600" />
-              <span className="font-bold">新建计划</span>
+              <Calendar className="w-7 h-7 text-[#E8863D]" />
+              <span className="font-extrabold text-lg">新建计划</span>
             </button>
           </div>
         </>
       )}
 
       {view === 'medicines' && (
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold">我的药品</h2>
-            <button onClick={onAddMed} className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white shadow-lg shadow-blue-200">
+        <div className="space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-2xl font-black text-[#5C4A3D] leading-tight">
+              {careTargetUserId === user.uid ? '我的药品' : `${careTargetLabel.split('（')[0] || '家人'}的药品`}
+            </h2>
+            <button
+              type="button"
+              onClick={onAddMed}
+              className="w-12 h-12 bg-[#E8863D] rounded-full flex items-center justify-center text-white shadow-lg shadow-orange-900/20 active:scale-95 transition-transform"
+            >
               <Plus className="w-6 h-6" />
             </button>
           </div>
           <div className="relative">
-            <input 
-              type="text" 
-              placeholder="搜索药品..." 
-              className="w-full pl-10 pr-4 py-3 rounded-2xl bg-white border border-slate-100 shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
+            <input
+              type="text"
+              placeholder="搜索药品…"
+              className="w-full pl-11 pr-4 py-3.5 rounded-[22px] bg-white/95 border border-[#FFE4CC] shadow-sm outline-none focus:ring-2 focus:ring-[#E8863D]/30 text-[#5C4A3D] placeholder:text-[#8B7A6E]/70"
             />
-            <Plus className="absolute left-3 top-3.5 w-5 h-5 text-slate-400 rotate-45" />
+            <Plus className="absolute left-3.5 top-3.5 w-5 h-5 text-[#E8863D]/60 rotate-45" />
           </div>
-          <div className="space-y-4">
-            {medications.length > 0 ? medications.map((med: any) => (
-              <div key={med.id} className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex items-center justify-between group transition-all">
-                <div className="flex items-center space-x-4">
-                  <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center">
-                    <Pill className="text-blue-600 w-7 h-7" />
+          <div className="space-y-3">
+            {medications.length > 0 ? (
+              medications.map((med: any) => (
+                <div
+                  key={med.id}
+                  className="bg-white/95 p-5 rounded-[26px] shadow-md border border-[#FFE4CC]/80 flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div className="w-14 h-14 bg-[#FFF8F0] rounded-2xl flex items-center justify-center border border-[#FFE4CC] shrink-0">
+                      <Pill className="text-[#E8863D] w-7 h-7" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-lg text-[#5C4A3D] truncate">{med.name}</h4>
+                      <p className="text-sm text-[#8B7A6E] font-medium">{med.specification || med.dosageForm}</p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="font-bold text-lg">{med.name}</h4>
-                    <p className="text-sm text-slate-500">{med.specification || med.dosageForm}</p>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onEditMed(med)}
+                      className="p-2.5 text-[#8B7A6E] hover:text-[#E8863D] hover:bg-[#FFE4CC]/50 rounded-xl transition-all"
+                    >
+                      <Edit2 className="w-5 h-5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteMed(med.id)}
+                      className="p-2.5 text-[#8B7A6E] hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center space-x-2">
-                  <button 
-                    onClick={() => onEditMed(med)}
-                    className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
-                  >
-                    <Edit2 className="w-5 h-5" />
-                  </button>
-                  <button 
-                    onClick={() => onDeleteMed(med.id)}
-                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-            )) : (
-              <div className="text-center py-10">
-                <p className="text-slate-400">尚未添加任何药品</p>
+              ))
+            ) : (
+              <div className="text-center py-12 rounded-[26px] border border-dashed border-[#FFB366]/45 bg-white/60">
+                <p className="text-[#8B7A6E] font-medium">还没有药品，点右上角加一颗吧</p>
               </div>
             )}
           </div>
@@ -1128,87 +1310,94 @@ function CaregiverView({
       )}
 
       {view === 'plans' && (
-        <div className="space-y-6 pb-10">
-          <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold">健康分析</h2>
-            <button onClick={onAddPlan} className="bg-blue-600 px-4 py-2 rounded-xl text-white text-sm font-bold shadow-lg shadow-blue-100 flex items-center space-x-2">
+        <div className="space-y-5 pb-10">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-2xl font-black text-[#5C4A3D]">健康与计划</h2>
+            <button
+              type="button"
+              onClick={onAddPlan}
+              className="bg-[#E8863D] px-4 py-2.5 rounded-[18px] text-white text-sm font-extrabold shadow-md shadow-orange-900/15 flex items-center gap-2 active:scale-95 transition-transform"
+            >
               <Plus className="w-4 h-4" />
               <span>新计划</span>
             </button>
           </div>
 
-          {/* Fun Element: Health Score - Moved up and color softened */}
-          <div className="bg-gradient-to-br from-orange-50 to-pink-50 p-6 rounded-[40px] text-slate-900 border border-orange-100 relative overflow-hidden">
-            <div className="relative z-10 space-y-4">
+          <div className="bg-gradient-to-br from-[#FFF8F0] via-[#FFE4CC]/60 to-[#FFD6CC]/40 p-6 rounded-[32px] text-[#5C4A3D] border border-[#FFB366]/35 relative overflow-hidden shadow-md">
+            <div className="relative z-10 space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-xl font-black uppercase tracking-widest text-orange-600">健康积分</h3>
-                <div className="bg-orange-200/50 text-orange-700 px-3 py-1 rounded-full text-xs font-bold">LV. 4</div>
+                <h3 className="text-lg font-black text-[#C96D2E]">陪伴小成就</h3>
+                <div className="bg-white/80 text-[#E8863D] px-3 py-1 rounded-full text-xs font-bold border border-[#FFE4CC]">
+                  加油中
+                </div>
               </div>
-              <div className="flex items-end space-x-2">
-                <span className="text-5xl font-black text-slate-900">1,280</span>
-                <span className="text-sm font-bold text-slate-500 mb-1">PTS</span>
+              <div className="flex items-end gap-2">
+                <span className="text-5xl font-black text-[#5C4A3D]">1,280</span>
+                <span className="text-sm font-bold text-[#8B7A6E] mb-1">分</span>
               </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                您已经连续 5 天准时服药了！继续保持，解锁“健康达人”勋章。
+              <p className="text-sm text-[#8B7A6E] leading-relaxed font-medium">
+                每一次按时确认，都是对家人温柔的支持～
               </p>
-              <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                <div className="h-full bg-orange-400 w-3/4" />
+              <div className="h-2.5 bg-white/70 rounded-full overflow-hidden border border-[#FFE4CC]/50">
+                <div className="h-full bg-gradient-to-r from-[#E8863D] to-[#F4C95D] w-3/4 rounded-full" />
               </div>
             </div>
-            <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-orange-200/20 rounded-full blur-3xl" />
+            <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-[#FFB366]/15 rounded-full blur-3xl" />
           </div>
 
-          {/* Compliance Chart */}
-          <div className="bg-white p-6 rounded-[40px] shadow-sm border border-slate-100 space-y-6">
-            <div className="flex items-center justify-between">
+          <div className="bg-white/95 p-6 rounded-[32px] shadow-lg border border-[#FFE4CC]/80 space-y-5">
+            <div className="flex items-center justify-between gap-2">
               <div>
-                <h3 className="font-bold text-slate-900">服药依从性</h3>
-                <p className="text-xs text-slate-500">过去 7 天的服药完成率</p>
+                <h3 className="font-extrabold text-[#5C4A3D] text-lg">服药依从性</h3>
+                <p className="text-sm text-[#8B7A6E] font-medium mt-0.5">过去 7 天完成率（示意曲线）</p>
               </div>
-              <div className="bg-green-50 text-green-600 px-3 py-1 rounded-full text-xs font-bold flex items-center">
-                <TrendingUp className="w-3 h-3 mr-1" />
-                +12%
+              <div className="bg-[#7CB87C]/15 text-[#3d6b3d] px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 border border-[#7CB87C]/25">
+                <TrendingUp className="w-3.5 h-3.5" />
+                稳步
               </div>
             </div>
-            
+
             <div className="h-48 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData}>
                   <defs>
-                    <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
+                    <linearGradient id="colorRateCare" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#E8863D" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#E8863D" stopOpacity={0.02} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis 
-                    dataKey="name" 
-                    axisLine={false} 
-                    tickLine={false} 
-                    tick={{ fontSize: 10, fill: '#94a3b8' }}
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#FFE4CC" />
+                  <XAxis
+                    dataKey="name"
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fontSize: 11, fill: '#8B7A6E', fontWeight: 600 }}
                     dy={10}
                   />
                   <YAxis hide domain={[0, 100]} />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                    itemStyle={{ color: '#2563eb', fontWeight: 'bold' }}
+                  <Tooltip
+                    contentStyle={{
+                      borderRadius: '16px',
+                      border: '1px solid #FFE4CC',
+                      boxShadow: '0 10px 24px rgba(139, 69, 19, 0.08)',
+                    }}
+                    itemStyle={{ color: '#C96D2E', fontWeight: 'bold' }}
                   />
-                  <Area 
-                    type="monotone" 
-                    dataKey="rate" 
-                    stroke="#2563eb" 
+                  <Area
+                    type="monotone"
+                    dataKey="rate"
+                    stroke="#E8863D"
                     strokeWidth={3}
-                    fillOpacity={1} 
-                    fill="url(#colorRate)" 
+                    fillOpacity={1}
+                    fill="url(#colorRateCare)"
                   />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
           </div>
 
-          {/* Active Plans List */}
-          <div className="space-y-4">
-            <h3 className="font-bold text-lg">正在进行的计划</h3>
+          <div className="space-y-3">
+            <h3 className="font-extrabold text-lg text-[#5C4A3D] px-1">正在进行的计划</h3>
             <div className="grid gap-4">
               {(() => {
                 // Group plans by medicineId to avoid duplicates and aggregate frequency based on CURRENT reminders
@@ -1234,8 +1423,8 @@ function CaregiverView({
 
                 if (aggregated.length === 0) {
                   return (
-                    <div className="text-center py-6 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                      <p className="text-slate-400 text-sm">暂无进行中的计划</p>
+                    <div className="text-center py-8 bg-white/70 rounded-[26px] border border-dashed border-[#FFB366]/45">
+                      <p className="text-[#8B7A6E] text-sm font-medium">暂无进行中的计划</p>
                     </div>
                   );
                 }
@@ -1244,40 +1433,53 @@ function CaregiverView({
                   const med = medications.find((m: any) => m.id === agg.medicineId);
                   if (!med) return null;
 
-                  // Calculate adherence for all plans of this medicine based on today's reminders
                   const medicineReminders = reminders.filter((r: any) => agg.planIds.includes(r.planId));
                   const taken = medicineReminders.filter((r: any) => r.status === 'taken').length;
                   const total = medicineReminders.length;
                   const rate = total > 0 ? Math.round((taken / total) * 100) : 0;
 
                   return (
-                    <div key={agg.medicineId} className={cn(
-                      "p-6 rounded-[32px] border flex items-center justify-between relative overflow-hidden",
-                      idx === 0 ? "bg-blue-600 border-blue-600 text-white" : "bg-white border-slate-100 text-slate-900"
-                    )}>
-                      {idx === 0 && (
-                        <div className="absolute -right-4 -top-4 w-24 h-24 bg-white/10 rounded-full blur-2xl" />
+                    <div
+                      key={agg.medicineId}
+                      className={cn(
+                        'p-5 rounded-[28px] border flex items-center justify-between relative overflow-hidden shadow-md',
+                        idx === 0
+                          ? 'bg-gradient-to-br from-[#E8863D] to-[#d97830] border-[#E8863D] text-white'
+                          : 'bg-white/95 border-[#FFE4CC] text-[#5C4A3D]',
                       )}
-                      <div className="flex items-center space-x-4 relative z-10">
-                        <div className={cn(
-                          "w-12 h-12 rounded-2xl flex items-center justify-center",
-                          idx === 0 ? "bg-white/20" : "bg-blue-50"
-                        )}>
-                          <Pill className={cn("w-6 h-6", idx === 0 ? "text-white" : "text-blue-600")} />
+                    >
+                      {idx === 0 && (
+                        <div className="absolute -right-4 -top-4 w-24 h-24 bg-white/15 rounded-full blur-2xl" />
+                      )}
+                      <div className="flex items-center gap-4 relative z-10 min-w-0">
+                        <div
+                          className={cn(
+                            'w-12 h-12 rounded-2xl flex items-center justify-center shrink-0',
+                            idx === 0 ? 'bg-white/20' : 'bg-[#FFF8F0] border border-[#FFE4CC]',
+                          )}
+                        >
+                          <Pill className={cn('w-6 h-6', idx === 0 ? 'text-white' : 'text-[#E8863D]')} />
                         </div>
-                        <div>
-                          <h4 className="font-bold">{med.name}</h4>
-                          <p className={cn("text-xs", idx === 0 ? "text-blue-100" : "text-slate-500")}>
-                            每日累计 {agg.totalSchedules} 次 · {agg.status === 'active' ? '进行中' : '已暂停'}
+                        <div className="min-w-0">
+                          <h4 className="font-bold truncate">{med.name}</h4>
+                          <p
+                            className={cn(
+                              'text-xs font-medium mt-0.5',
+                              idx === 0 ? 'text-white/85' : 'text-[#8B7A6E]',
+                            )}
+                          >
+                            今日共 {agg.totalSchedules} 次 · {agg.status === 'active' ? '进行中' : '已暂停'}
                           </p>
                         </div>
                       </div>
-                      <div className={cn(
-                        "w-12 h-12 rounded-full flex flex-col items-center justify-center font-black text-[10px]",
-                        idx === 0 ? "bg-white text-blue-600" : "bg-slate-100 text-slate-400"
-                      )}>
-                        <span className="text-sm">{rate}%</span>
-                        <span className="opacity-60">今日</span>
+                      <div
+                        className={cn(
+                          'w-14 h-14 rounded-full flex flex-col items-center justify-center font-black text-[10px] shrink-0',
+                          idx === 0 ? 'bg-white text-[#E8863D]' : 'bg-[#FFF8F0] text-[#8B7A6E] border border-[#FFE4CC]',
+                        )}
+                      >
+                        <span className="text-base leading-none">{rate}%</span>
+                        <span className="opacity-80 mt-0.5">今日</span>
                       </div>
                     </div>
                   );
@@ -1289,30 +1491,31 @@ function CaregiverView({
       )}
 
       {view === 'bindings' && (
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold">家人绑定</h2>
-          </div>
-          <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
-            <p className="text-slate-500 text-sm">输入长辈的 6 位 ID 和手机尾号后四位，即可建立绑定关系，协助管理用药计划。</p>
+        <div className="space-y-5">
+          <h2 className="text-2xl font-black text-[#5C4A3D]">家人绑定</h2>
+          <div className="bg-white/95 p-6 rounded-[28px] shadow-lg border border-[#FFE4CC] space-y-4">
+            <p className="text-[#8B7A6E] text-sm leading-relaxed font-medium">
+              输入长辈的 6 位 ID 和手机尾号后四位，就能陪 Ta 一起管理用药啦。
+            </p>
             <div className="space-y-3">
-              <input 
-                type="text" 
+              <input
+                type="text"
                 value={bindShortId}
                 onChange={(e) => setBindShortId(e.target.value)}
-                placeholder="长辈的 6 位 ID" 
+                placeholder="长辈的 6 位 ID"
                 maxLength={6}
-                className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-4 py-3.5 rounded-[18px] bg-[#FFF8F0] border border-[#FFE4CC] outline-none focus:ring-2 focus:ring-[#E8863D]/35 text-[#5C4A3D] font-semibold tracking-widest"
               />
-              <input 
-                type="text" 
+              <input
+                type="text"
                 value={bindPhoneLast4}
                 onChange={(e) => setBindPhoneLast4(e.target.value)}
-                placeholder="长辈手机尾号后 4 位" 
+                placeholder="长辈手机尾号后 4 位"
                 maxLength={4}
-                className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-4 py-3.5 rounded-[18px] bg-[#FFF8F0] border border-[#FFE4CC] outline-none focus:ring-2 focus:ring-[#E8863D]/35 text-[#5C4A3D] font-semibold"
               />
-              <button 
+              <button
+                type="button"
                 disabled={isBinding || bindShortId.length !== 6 || bindPhoneLast4.length !== 4}
                 onClick={async () => {
                   setIsBinding(true);
@@ -1321,257 +1524,61 @@ function CaregiverView({
                   setBindShortId('');
                   setBindPhoneLast4('');
                 }}
-                className="w-full bg-blue-600 text-white py-3 rounded-2xl font-bold hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full bg-gradient-to-r from-[#E8863D] to-[#d97830] text-white py-3.5 rounded-[18px] font-extrabold shadow-md shadow-orange-900/15 disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99] transition-transform"
               >
-                {isBinding ? '绑定中...' : '确认绑定'}
+                {isBinding ? '绑定中…' : '确认绑定'}
               </button>
             </div>
           </div>
-          
-          <div className="space-y-4 pt-4">
-            <h3 className="font-bold text-lg">已绑定的家人</h3>
+
+          <div className="space-y-3 pt-1">
+            <h3 className="font-extrabold text-lg text-[#5C4A3D] px-1">已绑定的长辈</h3>
             {bindings.length > 0 ? (
               <div className="space-y-3">
                 {bindings.map((binding: any) => {
                   const boundUser = boundUsers[binding.elderUserId];
                   return (
-                    <div key={binding.id} className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100 flex items-center justify-between">
-                      <div className="flex items-center space-x-4">
-                        <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold">
-                          {boundUser?.displayName?.substr(0, 2) || '家人'}
+                    <div
+                      key={binding.id}
+                      className="bg-white/95 p-4 rounded-[26px] shadow-md border border-[#FFE4CC]/80 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className="w-14 h-14 bg-[#FFE4CC]/70 rounded-full flex items-center justify-center text-[#5C4A3D] font-black text-sm shrink-0 border-2 border-white shadow-sm">
+                          {boundUser?.displayName?.slice(0, 2) || '长辈'}
                         </div>
-                        <div>
-                          <h4 className="font-bold">{boundUser?.displayName || '未知用户'}</h4>
-                          <p className="text-xs text-slate-500">ID: {boundUser?.shortId || '---'}</p>
+                        <div className="min-w-0">
+                          <h4 className="font-bold text-[#5C4A3D] truncate">
+                            {boundUser?.displayName || '未知用户'}
+                          </h4>
+                          <p className="text-xs text-[#8B7A6E] font-semibold mt-0.5">
+                            短号 {boundUser?.shortId || '---'}
+                          </p>
                         </div>
                       </div>
-                      <div className="px-3 py-1 bg-green-50 text-green-600 rounded-full text-xs font-bold">
-                        已绑定
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        <div className="px-3 py-1 bg-[#7CB87C]/20 text-[#2d6a2d] rounded-full text-xs font-bold border border-[#7CB87C]/25">
+                          已绑定
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onManageElderMedication(binding.elderUserId)}
+                          className="text-xs font-extrabold text-[#E8863D] hover:underline"
+                        >
+                          管理用药 →
+                        </button>
                       </div>
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="text-center py-8 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                <p className="text-slate-400 text-sm">暂无绑定的家人</p>
+              <div className="text-center py-10 bg-white/70 rounded-[26px] border border-dashed border-[#FFB366]/45">
+                <p className="text-[#8B7A6E] text-sm font-medium">还没有绑定，填上面信息即可邀请长辈</p>
               </div>
             )}
           </div>
         </div>
       )}
-    </motion.div>
-  );
-}
-
-function ElderView({ view, setView, reminders, user, profile, updateProfile }: any) {
-  const [showDue, setShowDue] = useState(false);
-  const [showProfile, setShowProfile] = useState(false);
-  const [editingPhone, setEditingPhone] = useState(false);
-  const [tempPhone, setTempPhone] = useState('');
-  
-  // Find the most relevant reminder: the first pending one
-  const nextReminder = reminders.find((r: any) => r.status === 'pending');
-  
-  const isPastDue = nextReminder ? new Date(nextReminder.dueTime) < new Date() : false;
-
-  return (
-    <motion.div 
-      key="elder"
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 1.05 }}
-      className="space-y-8"
-    >
-      {!showDue ? (
-        <div className="flex flex-col items-center text-center space-y-10 pt-10">
-          <div className="space-y-2">
-            <h2 className="text-6xl font-black text-slate-900">{new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</h2>
-            <p className="text-2xl font-medium text-slate-500">{new Date().toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
-          </div>
-
-          <div className="w-full bg-white p-8 rounded-[40px] shadow-xl shadow-orange-100 border-2 border-orange-200 space-y-6">
-            <div className={cn(
-              "inline-flex items-center space-x-2 px-4 py-2 rounded-full text-sm font-bold uppercase tracking-widest",
-              isPastDue ? "bg-red-100 text-red-700 animate-pulse" : "bg-orange-100 text-orange-700"
-            )}>
-              <Clock className="w-4 h-4" />
-              <span>{isPastDue ? '该吃药了！' : '下次提醒'}</span>
-            </div>
-            {nextReminder ? (
-              <>
-                <div className="space-y-2">
-                  <h3 className="text-4xl font-black text-slate-900">服药时间</h3>
-                  <p className={cn(
-                    "text-2xl font-bold",
-                    isPastDue ? "text-red-600" : "text-slate-500"
-                  )}>
-                    {new Date(nextReminder.dueTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}
-                  </p>
-                </div>
-                <button 
-                  onClick={() => setShowDue(true)}
-                  className={cn(
-                    "w-full py-6 rounded-3xl text-2xl font-black shadow-lg active:scale-95 transition-all",
-                    isPastDue ? "bg-red-600 text-white shadow-red-200" : "bg-orange-600 text-white shadow-orange-200"
-                  )}
-                >
-                  现在服用
-                </button>
-              </>
-            ) : (
-              <div className="py-4">
-                <p className="text-xl text-slate-400 font-bold">今日已完成所有服药</p>
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-4 w-full">
-            <button 
-              onClick={() => setView('today')}
-              className="bg-white p-6 rounded-[32px] flex flex-col items-center space-y-2 text-slate-600 font-bold shadow-sm border border-slate-100"
-            >
-              <History className="w-8 h-8" />
-              <span>服药记录</span>
-            </button>
-            <button 
-              onClick={() => setShowProfile(true)}
-              className="bg-white p-6 rounded-[32px] flex flex-col items-center space-y-2 text-slate-600 font-bold shadow-sm border border-slate-100"
-            >
-              <Users className="w-8 h-8" />
-              <span>家人联系</span>
-            </button>
-          </div>
-        </div>
-      ) : (
-        <motion.div 
-          initial={{ y: 50, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          className="fixed inset-0 bg-orange-600 z-50 p-8 flex flex-col justify-between"
-        >
-          <div className="text-center space-y-8 pt-12">
-            <h2 className="text-white text-3xl font-bold opacity-80 uppercase tracking-widest">该吃药了</h2>
-            <div className="space-y-4">
-              <h3 className="text-white text-7xl font-black">服药</h3>
-              <p className="text-white text-4xl opacity-90">1 片</p>
-            </div>
-            <div className="w-32 h-32 bg-white/20 rounded-full flex items-center justify-center mx-auto">
-              <Pill className="text-white w-16 h-16" />
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <button 
-              onClick={() => {
-                if (nextReminder) medicationService.confirmIntake(nextReminder.id, user.uid);
-                setShowDue(false);
-              }}
-              className="w-full bg-white text-orange-600 py-8 rounded-[32px] text-3xl font-black shadow-2xl active:scale-95 transition-transform flex items-center justify-center space-x-4"
-            >
-              <CheckCircle2 className="w-10 h-10" />
-              <span>我已经吃了</span>
-            </button>
-            <div className="grid grid-cols-2 gap-4">
-              <button 
-                onClick={() => setShowDue(false)}
-                className="bg-white/20 text-white py-6 rounded-[32px] text-xl font-bold active:scale-95 transition-transform"
-              >
-                10分钟后提醒
-              </button>
-              <button 
-                className="bg-white/20 text-white py-6 rounded-[32px] text-xl font-bold active:scale-95 transition-transform flex items-center justify-center space-x-2"
-              >
-                <Camera className="w-6 h-6" />
-                <span>拍照确认</span>
-              </button>
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* Profile Modal */}
-      <AnimatePresence>
-        {showProfile && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }} 
-              animate={{ scale: 1, opacity: 1 }} 
-              exit={{ scale: 0.9, opacity: 0 }} 
-              className="bg-white w-full max-w-md rounded-[40px] p-8 space-y-6 relative"
-            >
-              <button 
-                onClick={() => setShowProfile(false)}
-                className="absolute right-6 top-6 p-2 hover:bg-slate-100 rounded-full"
-              >
-                <Plus className="w-6 h-6 rotate-45 text-slate-400" />
-              </button>
-              
-              <div className="text-center space-y-2">
-                <h2 className="text-3xl font-black text-slate-900">我的信息</h2>
-                <p className="text-slate-500">将这些信息告诉家人，让他们协助您</p>
-              </div>
-
-              <div className="space-y-4 bg-slate-50 p-6 rounded-3xl border border-slate-100">
-                <div>
-                  <p className="text-sm text-slate-500 font-bold uppercase tracking-wider mb-1">我的 6 位 ID</p>
-                  <p className="text-4xl font-black text-blue-600 tracking-widest">{profile?.shortId || '---'}</p>
-                </div>
-                <div className="pt-4 border-t border-slate-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-sm text-slate-500 font-bold uppercase tracking-wider">手机号</p>
-                    {!editingPhone && (
-                      <button 
-                        onClick={() => {
-                          setTempPhone(profile?.phone || '');
-                          setEditingPhone(true);
-                        }}
-                        className="text-blue-600 text-sm font-bold"
-                      >
-                        修改
-                      </button>
-                    )}
-                  </div>
-                  
-                  {editingPhone ? (
-                    <div className="flex items-center space-x-2">
-                      <input 
-                        type="tel"
-                        value={tempPhone}
-                        onChange={(e) => setTempPhone(e.target.value)}
-                        placeholder="请输入手机号"
-                        className="flex-1 px-4 py-2 rounded-xl border border-slate-300 outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                      <button 
-                        onClick={() => {
-                          updateProfile({ phone: tempPhone });
-                          setEditingPhone(false);
-                        }}
-                        className="px-4 py-2 bg-blue-600 text-white font-bold rounded-xl"
-                      >
-                        保存
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <p className="text-2xl font-bold text-slate-900">{profile?.phone || '未设置'}</p>
-                      {!profile?.phone && (
-                        <p className="text-sm text-amber-600 mt-2">请设置手机号，以便家人绑定</p>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <button 
-                onClick={() => setShowProfile(false)}
-                className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold text-xl active:scale-95 transition-transform"
-              >
-                我知道了
-              </button>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </motion.div>
   );
 }

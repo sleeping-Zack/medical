@@ -6,7 +6,7 @@
 - FastAPI + MySQL + Redis
 - JWT（access token + refresh token）
 - 中国大陆手机号 + 短信验证码 + 密码
-- 短信服务抽象（Mock / 腾讯云预留 / 阿里云预留）
+- 短信服务抽象（Mock / 阿里云 SendSms 已用签名 HTTP 接入 / 腾讯云占位）
 
 ## 功能清单
 
@@ -168,6 +168,20 @@ API 默认 `http://127.0.0.1:8000`；模拟器可用：
 ```bash
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
 ```
+
+## 真实短信（阿里云）
+
+1. 在 [阿里云短信服务控制台](https://dysms.console.aliyun.com/) 开通服务，创建 **短信签名** 与 **验证码模板**（模板内需有一个变量，例如 `${code}`，对应配置项里的占位符名）。
+2. 创建 RAM 子账号或使用主账号，为其生成 **AccessKey**（勿提交到仓库），并确保有 `SendSms` 权限。
+3. 在 `production_stack/backend/.env` 中设置：
+   - `SMS_PROVIDER=aliyun`
+   - `ALIYUN_SMS_ACCESS_KEY_ID`、`ALIYUN_SMS_ACCESS_KEY_SECRET`
+   - `ALIYUN_SMS_SIGN_NAME`、`ALIYUN_SMS_TEMPLATE_CODE`（与控制台一致）
+   - 若模板变量名不是 `code`，设置 `ALIYUN_SMS_TEMPLATE_PARAM_KEY` 与模板一致。
+4. **生产环境** 建议同时设置 `APP_ENV=production`、`DEBUG=false`，这样 `/api/v1/auth/sms/send` 的响应里 **不会** 再带 `debug_code`。
+5. 若第三方发送失败，后端会 **回滚** 本次 Redis 冷却/计数与数据库中的待验证日志，避免「没收到短信却进入冷却」。
+
+腾讯云：`SMS_PROVIDER=tencent` 仍为占位，需自行接入 SDK 或 HTTP 后再用。
 
 ## 后端接口（8 个接口 + mock 示例）
 

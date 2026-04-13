@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     aliyun_sms_access_key_secret: Optional[str] = None
     aliyun_sms_sign_name: Optional[str] = None
     aliyun_sms_template_code: Optional[str] = None
+    #: 短信模板里验证码变量名，与控制台模板一致，一般为 code
+    aliyun_sms_template_param_key: str = "code"
+    #: 阿里云短信 API 区域，默认杭州
+    aliyun_sms_region_id: str = "cn-hangzhou"
 
 
 settings = Settings()

@@ -14,6 +14,8 @@ class MedApp extends ConsumerWidget {
       title: '药安心',
       theme: buildAppTheme(),
       routerConfig: router,
+      // 右上角 DEBUG 条只是「调试构建」标记，不是故障；关闭后减少「以为进了错误模式」的误解
+      debugShowCheckedModeBanner: false,
     );
   }
 }

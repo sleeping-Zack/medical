@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/api_client.dart';
@@ -30,37 +31,53 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> bootstrap() async {
     state = state.copyWith(isBusy: true);
-    final accessToken = await _storage.readAccessToken();
-    final refreshToken = await _storage.readRefreshToken();
-    if (accessToken == null || refreshToken == null) {
-      _apiClient.setAccessToken(null);
-      state = AuthState.unauthenticated;
-      return;
-    }
-
-    _apiClient.setAccessToken(accessToken);
-    state = state.copyWith(accessToken: accessToken, refreshToken: refreshToken);
-
     try {
-      final user = await _repo.me();
-      state = AuthState(status: AuthStatus.authenticated, user: user, accessToken: accessToken, refreshToken: refreshToken);
-      return;
-    } catch (_) {
+      final accessToken = await _storage.readAccessToken();
+      final refreshToken = await _storage.readRefreshToken();
+      if (accessToken == null || refreshToken == null) {
+        _apiClient.setAccessToken(null);
+        state = AuthState.unauthenticated;
+        return;
+      }
+
+      _apiClient.setAccessToken(accessToken);
+      state = state.copyWith(accessToken: accessToken, refreshToken: refreshToken);
+
       try {
-        final pair = await _repo.refresh(refreshToken: refreshToken);
-        await _persistTokens(pair);
         final user = await _repo.me();
         state = AuthState(
           status: AuthStatus.authenticated,
           user: user,
-          accessToken: pair.accessToken,
-          refreshToken: pair.refreshToken,
+          accessToken: accessToken,
+          refreshToken: refreshToken,
         );
       } catch (_) {
-        await _storage.clear();
-        _apiClient.setAccessToken(null);
-        state = AuthState.unauthenticated;
+        try {
+          final pair = await _repo.refresh(refreshToken: refreshToken);
+          await _persistTokens(pair);
+          final user = await _repo.me();
+          state = AuthState(
+            status: AuthStatus.authenticated,
+            user: user,
+            accessToken: pair.accessToken,
+            refreshToken: pair.refreshToken,
+          );
+        } catch (_) {
+          await _storage.clear();
+          _apiClient.setAccessToken(null);
+          state = AuthState.unauthenticated;
+        }
       }
+    } catch (e, st) {
+      // 本地存储异常等会导致一直停在 unknown，路由永远留在启动页
+      debugPrint('Auth bootstrap 失败: $e\n$st');
+      try {
+        await _storage.clear();
+      } catch (_) {}
+      _apiClient.setAccessToken(null);
+      state = AuthState.unauthenticated;
+    } finally {
+      state = state.copyWith(isBusy: false);
     }
   }
 

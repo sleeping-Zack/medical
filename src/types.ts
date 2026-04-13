@@ -93,3 +93,11 @@ export interface ElderBinding {
   active: boolean;
   createdAt: string;
 }
+
+/** 写入长辈本地 store：谁绑定了我（与子女端 bindings 镜像，便于长辈端展示） */
+export interface ElderManagerLink {
+  managerUserId: string;
+  relationType: string;
+  createdAt: string;
+  bindingId: string;
+}

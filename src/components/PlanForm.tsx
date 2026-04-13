@@ -10,9 +10,21 @@ interface PlanFormProps {
   onSave: (data: any) => void;
   onCancel: () => void;
   loading?: boolean;
+  /** 服药计划归属对象（本人或已绑定家人），切换后会由上层重新拉取药品列表 */
+  careTargetUserId: string;
+  onCareTargetUserIdChange: (userId: string) => void;
+  careTargetOptions: { id: string; label: string }[];
 }
 
-export function PlanForm({ medications, onSave, onCancel, loading }: PlanFormProps) {
+export function PlanForm({
+  medications,
+  onSave,
+  onCancel,
+  loading,
+  careTargetUserId,
+  onCareTargetUserIdChange,
+  careTargetOptions,
+}: PlanFormProps) {
   const [medicineId, setMedicineId] = useState(medications[0]?.id || '');
   const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [schedules, setSchedules] = useState<Partial<Schedule>[]>([
@@ -22,7 +34,12 @@ export function PlanForm({ medications, onSave, onCancel, loading }: PlanFormPro
   const [activeTimePicker, setActiveTimePicker] = useState<{ index: number, time: string } | null>(null);
 
   React.useEffect(() => {
-    if (!medicineId && medications.length > 0) {
+    if (medications.length === 0) {
+      setMedicineId('');
+      return;
+    }
+    const exists = medications.some((m) => m.id === medicineId);
+    if (!medicineId || !exists) {
       setMedicineId(medications[0].id);
     }
   }, [medications, medicineId]);
@@ -68,7 +85,7 @@ export function PlanForm({ medications, onSave, onCancel, loading }: PlanFormPro
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({ medicineId, startDate, schedules });
+    onSave({ medicineId, startDate, schedules, targetUserId: careTargetUserId });
   };
 
   return (
@@ -83,16 +100,38 @@ export function PlanForm({ medications, onSave, onCancel, loading }: PlanFormPro
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">选择药品</label>
-            <select 
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-              value={medicineId}
-              onChange={(e) => setMedicineId(e.target.value)}
+            <label className="block text-sm font-medium text-slate-700 mb-1">为谁添加日程</label>
+            <p className="text-xs text-slate-500 mb-2">选择家人后，下方药品列表会切换为该对象已录入的药品（需先为其添加药品）。</p>
+            <select
+              value={careTargetUserId}
+              onChange={(e) => onCareTargetUserIdChange(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium"
             >
-              {medications.map(m => (
-                <option key={m.id} value={m.id}>{m.name}</option>
+              {careTargetOptions.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">选择药品</label>
+            {medications.length === 0 ? (
+              <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
+                该对象还没有药品，请先关闭本页，在「药品」页为其添加药品后再建计划。
+              </p>
+            ) : (
+              <select 
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                value={medicineId}
+                onChange={(e) => setMedicineId(e.target.value)}
+              >
+                {medications.map(m => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div>
@@ -186,10 +225,10 @@ export function PlanForm({ medications, onSave, onCancel, loading }: PlanFormPro
 
         <button 
           type="submit"
-          disabled={loading}
+          disabled={loading || medications.length === 0}
           className={cn(
             "w-full py-4 rounded-2xl font-bold shadow-lg transition-all active:scale-95 flex items-center justify-center space-x-2",
-            loading ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white shadow-blue-100"
+            loading || medications.length === 0 ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white shadow-blue-100"
           )}
         >
           {loading ? (

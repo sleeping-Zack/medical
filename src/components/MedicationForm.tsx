@@ -10,9 +10,23 @@ interface MedicationFormProps {
   onCancel: () => void;
   initialData?: any;
   loading?: boolean;
+  /** 新建药品时：可选「为谁添加」，与看护人顶栏管理对象同步 */
+  careTargetUserId?: string;
+  onCareTargetUserIdChange?: (userId: string) => void;
+  careTargetOptions?: { id: string; label: string }[];
+  showTargetPicker?: boolean;
 }
 
-export function MedicationForm({ onSave, onCancel, initialData, loading }: MedicationFormProps) {
+export function MedicationForm({
+  onSave,
+  onCancel,
+  initialData,
+  loading,
+  careTargetUserId,
+  onCareTargetUserIdChange,
+  careTargetOptions = [],
+  showTargetPicker = false,
+}: MedicationFormProps) {
   const [name, setName] = useState(initialData?.name || '');
   const [specification, setSpecification] = useState(initialData?.specification || '');
   const [dosageForm, setDosageForm] = useState<DosageForm>(initialData?.dosageForm || 'tablet');
@@ -33,6 +47,24 @@ export function MedicationForm({ onSave, onCancel, initialData, loading }: Medic
       </div>
 
       <div className="space-y-4">
+        {showTargetPicker && careTargetUserId && onCareTargetUserIdChange && careTargetOptions.length > 0 && (
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">为谁添加药品</label>
+            <p className="text-xs text-slate-500 mb-2">药品会记入该对象名下，家人登录老人端后将看到自己的日程。</p>
+            <select
+              value={careTargetUserId}
+              onChange={(e) => onCareTargetUserIdChange(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium"
+            >
+              {careTargetOptions.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">药品名称</label>
           <input 

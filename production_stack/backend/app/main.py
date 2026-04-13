@@ -2,13 +2,37 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.care import router as care_router
 from app.core.config import settings
-from app.core.database import engine
+from app.core.database import SessionLocal, engine
 from app.models import Base
+from app.repositories.user_repo import UserRepository
 from app.schemas.common import ApiResponse
+
+
+def _ensure_users_short_id_column() -> None:
+    """旧库缺列时补齐 short_id（create_all 不会 ALTER 已有表结构）。"""
+    insp = inspect(engine)
+    if "users" not in insp.get_table_names():
+        return
+    col_names = {c["name"] for c in insp.get_columns("users")}
+    if "short_id" in col_names:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "mysql":
+            conn.execute(text("ALTER TABLE users ADD COLUMN short_id VARCHAR(6) NULL"))
+            conn.execute(text("CREATE UNIQUE INDEX ix_users_short_id ON users (short_id)"))
+        elif dialect in {"postgresql", "postgres"}:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS short_id VARCHAR(6) NULL"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_short_id ON users (short_id)"))
+        elif dialect == "sqlite":
+            conn.execute(text("ALTER TABLE users ADD COLUMN short_id VARCHAR(6)"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_short_id ON users (short_id)"))
 
 
 def create_app() -> FastAPI:
@@ -46,6 +70,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup():
         Base.metadata.create_all(bind=engine)
+        _ensure_users_short_id_column()
+        db = SessionLocal()
+        try:
+            UserRepository(db).backfill_missing_short_ids()
+        finally:
+            db.close()
 
     @app.get("/", include_in_schema=False, response_class=HTMLResponse)
     def root():
@@ -82,6 +112,7 @@ def create_app() -> FastAPI:
         return ApiResponse(data={"status": "ok"})
 
     app.include_router(auth_router)
+    app.include_router(care_router)
     return app
 
 

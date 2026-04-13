@@ -89,7 +89,16 @@ class SmsCodeService:
         self.rds.setex(log_id_key, settings.sms_code_ttl_seconds, str(log.id))
         self.rds.setex(cooldown_key, settings.sms_cooldown_seconds, "1")
 
-        self.sms.send_code(phone=phone, code=code, scene=scene)
+        try:
+            self.sms.send_code(phone=phone, code=code, scene=scene)
+        except Exception:
+            self.rds.delete(code_key)
+            self.rds.delete(log_id_key)
+            self.rds.delete(cooldown_key)
+            self.rds.decr(hour_key)
+            self.rds.decr(day_key)
+            log_repo.delete_by_id(log.id)
+            raise
 
         if settings.debug or settings.app_env == "dev":
             return code
