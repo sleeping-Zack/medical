@@ -1,12 +1,12 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 
 class BindingCreateRequest(BaseModel):
-    elder_short_id: str = Field(..., min_length=6, max_length=6, description="长辈端账号 6 位绑定短号")
-    phone_last4: str = Field(..., min_length=4, max_length=4, description="长辈手机号后四位")
+    elder_short_id: str = Field(..., min_length=6, max_length=6, description="目标账号 6 位绑定短号")
+    phone_last4: str = Field(..., min_length=4, max_length=4, description="目标账号手机号后四位")
 
     @field_validator("elder_short_id")
     @classmethod
@@ -32,11 +32,25 @@ class BoundElderOut(BaseModel):
     can_receive_alerts: bool
 
 
+class BoundCaregiverOut(BaseModel):
+    caregiver_id: int
+    short_id: str
+    phone_masked: str
+    role: str
+
+
 class MedicineCreateRequest(BaseModel):
     target_user_id: int = Field(..., ge=1)
     name: str = Field(..., min_length=1, max_length=128)
     specification: Optional[str] = Field(default=None, max_length=255)
     note: Optional[str] = None
+
+
+class MedicineUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    specification: Optional[str] = Field(default=None, max_length=255)
+    note: Optional[str] = None
+    archived: Optional[bool] = None
 
 
 class MedicineOut(BaseModel):
@@ -46,6 +60,8 @@ class MedicineOut(BaseModel):
     specification: Optional[str]
     note: Optional[str]
     archived: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 class ScheduleItem(BaseModel):
@@ -79,3 +95,33 @@ class PlanOut(BaseModel):
     start_date: date
     schedules_json: List[dict]
     label: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReminderOut(BaseModel):
+    id: str
+    target_user_id: int
+    plan_id: int
+    schedule_id: str
+    due_time: datetime
+    status: str
+    medicine_name: str
+    created_at: datetime
+    confirmed_at: Optional[datetime] = None
+
+
+class ReminderMarkRequest(BaseModel):
+    target_user_id: int = Field(..., ge=1)
+    plan_id: int = Field(..., ge=1)
+    schedule_id: str = Field(..., min_length=1, max_length=64)
+    due_time: datetime
+    action: str = Field(..., description="taken 或 deleted")
+
+    @field_validator("action")
+    @classmethod
+    def valid_action(cls, v: str) -> str:
+        vv = (v or "").strip().lower()
+        if vv not in {"taken", "deleted"}:
+            raise ValueError("action 仅支持 taken 或 deleted")
+        return vv

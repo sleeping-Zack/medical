@@ -33,13 +33,14 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiError, getAccessToken, getRefreshToken, clearTokenPair } from './lib/api';
 import { fetchMe, loginWithPasswordApi, logoutApi, registerApi, sendRegisterSms, type UserMe } from './lib/authApi';
+import { createBinding, listBindingsFromServer, mapServerBindingsToUi } from './lib/careApi';
 import { cn, formatTime } from './lib/utils';
 import { UserRole, UserProfile, Medication, MedicationPlan, ReminderEvent, ElderBinding } from './types';
 import { MedicationForm } from './components/MedicationForm';
 import { PlanForm } from './components/PlanForm';
 import { AuthScreen } from './components/AuthScreen';
 import { ElderHomeView } from './components/ElderHomeView';
-import { getProfileFromRegistry, medicationService, syncProfileToRegistry } from './services/medicationService';
+import { medicationService, syncProfileToRegistry } from './services/medicationService';
 
 /** 已登录用户（对接 JWT 后端，uid 为后端用户数字 id 的字符串） */
 export interface AuthUser {
@@ -114,18 +115,26 @@ const useAuth = () => {
   const applyMeToState = (me: UserMe) => {
     const uid = String(me.id);
     setUser({ uid, phone: me.phone });
+    const serverShortId = (me.short_id ?? '').trim();
+
     const saved = localStorage.getItem(`profile_${uid}`);
     if (saved) {
       try {
         const p = JSON.parse(saved) as UserProfile;
-        setProfile(p);
-        syncProfileToRegistry(p);
+        const merged: UserProfile = {
+          ...p,
+          uid,
+          phone: me.phone,
+          shortId: serverShortId,
+        };
+        localStorage.setItem(`profile_${uid}`, JSON.stringify(merged));
+        setProfile(merged);
+        syncProfileToRegistry(merged);
         return;
       } catch {
         /* fallthrough */
       }
     }
-    const shortId = Math.floor(100000 + Math.random() * 900000).toString();
     const defaultMode: UserRole = me.role === 'elderly' ? 'elder' : 'caregiver';
     const p: UserProfile = {
       uid,
@@ -134,7 +143,7 @@ const useAuth = () => {
       fontScale: 1.2,
       voiceEnabled: true,
       highContrast: false,
-      shortId,
+      shortId: serverShortId,
       phone: me.phone,
     };
     localStorage.setItem(`profile_${uid}`, JSON.stringify(p));
@@ -198,7 +207,7 @@ const useAuth = () => {
       const me = await registerApi(phone, smsCode, password, apiRole);
       const uid = String(me.id);
       setUser({ uid, phone: me.phone });
-      const shortId = Math.floor(100000 + Math.random() * 900000).toString();
+      const shortId = (me.short_id ?? '').trim();
       const newProfile: UserProfile = {
         uid,
         displayName: `用户${phone.slice(-4)}`,
@@ -401,15 +410,10 @@ function AppContent() {
 
   const loadBindings = async () => {
     if (!user) return;
-    const data = await medicationService.getBindings(user.uid) as ElderBinding[];
-    setBindings(data);
-    
-    const newBoundUsers: Record<string, UserProfile> = {};
-    for (const binding of data) {
-      const p = getProfileFromRegistry(binding.elderUserId);
-      if (p) newBoundUsers[binding.elderUserId] = p;
-    }
-    setBoundUsers(newBoundUsers);
+    const rows = await listBindingsFromServer();
+    const { bindings: uiBindings, boundUsers: uiBoundUsers } = mapServerBindingsToUi(user.uid, rows);
+    setBindings(uiBindings);
+    setBoundUsers(uiBoundUsers);
   };
 
   useEffect(() => {
@@ -421,7 +425,7 @@ function AppContent() {
   const handleBindElder = async (shortId: string, phoneLast4: string) => {
     if (!user) return;
     try {
-      await medicationService.bindElder(user.uid, shortId, phoneLast4);
+      await createBinding(shortId, phoneLast4);
       setNotification({ message: '绑定成功！', type: 'success' });
       loadBindings();
     } catch (error: any) {

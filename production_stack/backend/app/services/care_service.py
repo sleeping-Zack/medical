@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional
 
 from sqlalchemy import select
@@ -6,24 +6,23 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import forbidden, not_found
 from app.models.caregiver_binding import BindingStatus, CaregiverBinding
+from app.models.intake_record import IntakeAction, IntakeRecord
 from app.models.medicine import Medicine
 from app.models.medicine_plan import MedicinePlan, PlanStatus
-from app.models.user import User, UserRole
-from app.schemas.care import MedicineOut, PlanOut, ScheduleItem
+from app.models.user import User
+from app.schemas.care import MedicineOut, MedicineUpdateRequest, PlanOut, ReminderOut, ScheduleItem
 
 
 class CareService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _assert_personal_can_manage_target(self, *, caregiver: User, target_user_id: int) -> None:
-        if caregiver.role != UserRole.PERSONAL:
-            raise forbidden("仅个人端可代管用药")
-        if target_user_id == caregiver.id:
+    def _assert_user_can_manage_target(self, *, current_user: User, target_user_id: int) -> None:
+        if target_user_id == current_user.id:
             return
         binding = self.db.execute(
             select(CaregiverBinding).where(
-                CaregiverBinding.caregiver_id == caregiver.id,
+                CaregiverBinding.caregiver_id == current_user.id,
                 CaregiverBinding.elder_id == target_user_id,
                 CaregiverBinding.status == BindingStatus.ACTIVE,
                 CaregiverBinding.can_manage_medicine.is_(True),
@@ -41,7 +40,7 @@ class CareService:
         specification: Optional[str],
         note: Optional[str],
     ) -> Medicine:
-        self._assert_personal_can_manage_target(caregiver=caregiver, target_user_id=target_user_id)
+        self._assert_user_can_manage_target(current_user=caregiver, target_user_id=target_user_id)
         m = Medicine(
             target_user_id=target_user_id,
             created_by_user_id=caregiver.id,
@@ -55,23 +54,32 @@ class CareService:
         self.db.refresh(m)
         return m
 
-    def list_medicines_for_personal(self, *, caregiver: User, target_user_id: int, include_archived: bool = False) -> List[Medicine]:
-        self._assert_personal_can_manage_target(caregiver=caregiver, target_user_id=target_user_id)
+    def list_medicines_for_user(self, *, current_user: User, target_user_id: int, include_archived: bool = False) -> List[Medicine]:
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
         q = select(Medicine).where(Medicine.target_user_id == target_user_id)
         if not include_archived:
             q = q.where(Medicine.archived.is_(False))
         q = q.order_by(Medicine.id.desc())
         return list(self.db.execute(q).scalars().all())
 
-    def list_medicines_for_elder(self, *, elder: User) -> List[Medicine]:
-        if elder.role != UserRole.ELDERLY:
-            raise forbidden("仅限长辈端查看")
-        q = (
-            select(Medicine)
-            .where(Medicine.target_user_id == elder.id, Medicine.archived.is_(False))
-            .order_by(Medicine.id.desc())
-        )
-        return list(self.db.execute(q).scalars().all())
+    def update_medicine(self, *, current_user: User, medicine_id: int, payload: MedicineUpdateRequest) -> Medicine:
+        m = self.db.get(Medicine, medicine_id)
+        if not m:
+            raise not_found("药品不存在")
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=m.target_user_id)
+
+        if payload.name is not None:
+            m.name = payload.name.strip()
+        if payload.specification is not None:
+            m.specification = payload.specification.strip() if payload.specification else None
+        if payload.note is not None:
+            m.note = payload.note
+        if payload.archived is not None:
+            m.archived = payload.archived
+        self.db.add(m)
+        self.db.commit()
+        self.db.refresh(m)
+        return m
 
     def create_plan(
         self,
@@ -83,10 +91,10 @@ class CareService:
         schedules: List[ScheduleItem],
         label: Optional[str],
     ) -> MedicinePlan:
-        self._assert_personal_can_manage_target(caregiver=caregiver, target_user_id=target_user_id)
+        self._assert_user_can_manage_target(current_user=caregiver, target_user_id=target_user_id)
         med = self.db.get(Medicine, medicine_id)
         if not med or med.target_user_id != target_user_id:
-            raise not_found("药品不存在或不属于该长辈")
+            raise not_found("药品不存在或不属于该目标账号")
         payload = [s.model_dump() for s in schedules]
         plan = MedicinePlan(
             target_user_id=target_user_id,
@@ -102,8 +110,8 @@ class CareService:
         self.db.refresh(plan)
         return plan
 
-    def list_plans_for_personal(self, *, caregiver: User, target_user_id: int) -> List[PlanOut]:
-        self._assert_personal_can_manage_target(caregiver=caregiver, target_user_id=target_user_id)
+    def list_plans_for_user(self, *, current_user: User, target_user_id: int) -> List[PlanOut]:
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
         rows = self.db.execute(
             select(MedicinePlan, Medicine)
             .join(Medicine, Medicine.id == MedicinePlan.medicine_id)
@@ -122,9 +130,123 @@ class CareService:
                     start_date=p.start_date,
                     schedules_json=list(p.schedules_json or []),
                     label=p.label,
+                    created_at=p.created_at,
+                    updated_at=p.updated_at,
                 )
             )
         return out
+
+    def list_today_reminders_for_user(
+        self,
+        *,
+        current_user: User,
+        target_user_id: int,
+        on_date: date,
+    ) -> List[ReminderOut]:
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
+        plans = self.db.execute(
+            select(MedicinePlan, Medicine)
+            .join(Medicine, Medicine.id == MedicinePlan.medicine_id)
+            .where(
+                MedicinePlan.target_user_id == target_user_id,
+                MedicinePlan.status == PlanStatus.ACTIVE,
+                MedicinePlan.start_date <= on_date,
+            )
+            .order_by(MedicinePlan.id.desc())
+        ).all()
+
+        day_start = datetime.combine(on_date, time.min)
+        day_end = day_start + timedelta(days=1)
+        intake_rows = self.db.execute(
+            select(IntakeRecord).where(
+                IntakeRecord.target_user_id == target_user_id,
+                IntakeRecord.due_time >= day_start,
+                IntakeRecord.due_time < day_end,
+            )
+        ).scalars().all()
+        by_event_key = {(r.plan_id, r.schedule_id, r.due_time): r for r in intake_rows}
+
+        out: List[ReminderOut] = []
+        weekday_idx = on_date.weekday()  # Monday=0 ... Sunday=6
+        now = datetime.utcnow()
+        for p, m in plans:
+            schedules = list(p.schedules_json or [])
+            for idx, sched in enumerate(schedules):
+                weekdays = str(sched.get("weekdays", "1111111"))
+                if len(weekdays) != 7 or weekdays[weekday_idx] != "1":
+                    continue
+                hour = int(sched.get("hour", 0))
+                minute = int(sched.get("minute", 0))
+                due = datetime.combine(on_date, time(hour=hour, minute=minute))
+                schedule_id = f"{p.id}-{idx}"
+                record = by_event_key.get((p.id, schedule_id, due))
+                status = "pending"
+                confirmed_at = None
+                if record:
+                    if record.action == IntakeAction.DELETED:
+                        status = "deleted"
+                    else:
+                        status = "taken"
+                        confirmed_at = record.updated_at
+                out.append(
+                    ReminderOut(
+                        id=f"{target_user_id}|{p.id}|{schedule_id}|{due.isoformat()}",
+                        target_user_id=p.target_user_id,
+                        plan_id=p.id,
+                        schedule_id=schedule_id,
+                        due_time=due,
+                        status=status,
+                        medicine_name=m.name,
+                        created_at=now,
+                        confirmed_at=confirmed_at,
+                    )
+                )
+
+        out.sort(key=lambda x: x.due_time)
+        return out
+
+    def mark_reminder(
+        self,
+        *,
+        current_user: User,
+        target_user_id: int,
+        plan_id: int,
+        schedule_id: str,
+        due_time: datetime,
+        action: str,
+    ) -> IntakeRecord:
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
+        plan = self.db.get(MedicinePlan, plan_id)
+        if not plan or plan.target_user_id != target_user_id:
+            raise not_found("提醒对应计划不存在")
+        row = self.db.execute(
+            select(IntakeRecord).where(
+                IntakeRecord.target_user_id == target_user_id,
+                IntakeRecord.plan_id == plan_id,
+                IntakeRecord.schedule_id == schedule_id,
+                IntakeRecord.due_time == due_time,
+            )
+        ).scalar_one_or_none()
+        if row:
+            row.action = action
+            row.confirmed_by_user_id = current_user.id
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            return row
+
+        row = IntakeRecord(
+            target_user_id=target_user_id,
+            confirmed_by_user_id=current_user.id,
+            plan_id=plan_id,
+            schedule_id=schedule_id,
+            due_time=due_time,
+            action=action,
+        )
+        self.db.add(row)
+        self.db.commit()
+        self.db.refresh(row)
+        return row
 
 
 def medicine_to_out(m: Medicine) -> MedicineOut:
@@ -135,4 +257,6 @@ def medicine_to_out(m: Medicine) -> MedicineOut:
         specification=m.specification,
         note=m.note,
         archived=m.archived,
+        created_at=m.created_at,
+        updated_at=m.updated_at,
     )

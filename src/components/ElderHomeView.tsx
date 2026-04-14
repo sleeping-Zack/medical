@@ -118,19 +118,21 @@ export function ElderHomeView({
   }, []);
 
   useEffect(() => {
-    const refresh = () => setManagers(medicationService.getManagersForElder(user.uid));
-    refresh();
-    const onVis = () => {
-      if (document.visibilityState === 'visible') refresh();
+    const refresh = async () => {
+      try {
+        const data = await medicationService.getManagersForElder(user.uid);
+        setManagers(data);
+      } catch {
+        setManagers([]);
+      }
     };
-    const onStorage = (e: StorageEvent) => {
-      if (e.key?.startsWith('medapp_store_') || e.key === 'medapp_user_registry') refresh();
+    void refresh();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void refresh();
     };
     document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('storage', onStorage);
     return () => {
       document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('storage', onStorage);
     };
   }, [user.uid]);
 
@@ -509,9 +511,8 @@ export function ElderHomeView({
         </p>
         {managers.length === 0 ? (
           <div className="text-lg leading-relaxed py-2 space-y-2" style={{ color: warm.textSoft }}>
-            <p>若子女已在<strong className="text-[#5C4A3D]">本机同一浏览器</strong>里绑定过您，刷新页面或切换回再打开即可同步。</p>
-            <p>若子女在<strong className="text-[#5C4A3D]">另一台手机/电脑</strong>上操作，网页版数据仍在各自浏览器里，暂时看不到对方绑定；需要后端同步后才会互通。</p>
-            <p>也可把首页的短号告诉子女，由他们在「家人绑定」里添加您。</p>
+            <p>还没有已绑定家人。</p>
+            <p>请让对方使用绑定短号 + 手机后四位发起绑定，成功后这里会自动显示。</p>
           </div>
         ) : (
           <ul className="space-y-3">

@@ -75,6 +75,20 @@ export async function apiGetJson<T>(path: string): Promise<T> {
   return json.data as T;
 }
 
+export async function apiPutJson<T>(path: string, body: unknown): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const t = getAccessToken();
+  if (t) headers['Authorization'] = `Bearer ${t}`;
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(body),
+  });
+  const json = await parseJson(res);
+  if (json.code !== 0) throw new ApiError(json.message || '请求失败', json.code);
+  return json.data as T;
+}
+
 export async function tryRefreshTokens(): Promise<boolean> {
   const refresh = getRefreshToken();
   if (!refresh) return false;

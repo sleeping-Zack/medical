@@ -11,6 +11,8 @@ export interface UserMe {
   id: number;
   phone: string;
   role: string;
+  /** 6 位绑定短号，与数据库 users.short_id 一致；长辈端展示、家属绑定以服务端为准 */
+  short_id?: string;
 }
 
 export async function sendRegisterSms(phone: string): Promise<{ cooldown_seconds: number; debug_code?: string | null }> {

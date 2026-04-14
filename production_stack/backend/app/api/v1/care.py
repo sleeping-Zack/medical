@@ -1,19 +1,24 @@
+from datetime import date
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_personal
+from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.medicine import Medicine
 from app.models.user import User
 from app.schemas.care import (
     BindingCreateRequest,
+    BoundCaregiverOut,
     BoundElderOut,
     MedicineCreateRequest,
+    MedicineUpdateRequest,
     MedicineOut,
     PlanCreateRequest,
     PlanOut,
+    ReminderMarkRequest,
+    ReminderOut,
 )
 from app.schemas.common import ApiResponse
 from app.services.binding_service import BindingService
@@ -25,7 +30,7 @@ router = APIRouter(prefix="/api/v1", tags=["care"])
 @router.post("/bindings", response_model=ApiResponse[BoundElderOut])
 def create_binding(
     body: BindingCreateRequest,
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     svc = BindingService(db)
@@ -39,27 +44,36 @@ def create_binding(
 
 @router.get("/bindings", response_model=ApiResponse[List[BoundElderOut]])
 def list_bindings(
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     rows = BindingService(db).list_bound_elders(caregiver=caregiver)
     return ApiResponse(data=rows)
 
 
+@router.get("/bindings/incoming", response_model=ApiResponse[List[BoundCaregiverOut]])
+def list_incoming_bindings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = BindingService(db).list_caregivers_for_target(target_user=current_user)
+    return ApiResponse(data=rows)
+
+
 @router.get("/care/medicines", response_model=ApiResponse[List[MedicineOut]])
 def list_medicines_for_caregiver(
     target_user_id: int = Query(..., ge=1),
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    meds = CareService(db).list_medicines_for_personal(caregiver=caregiver, target_user_id=target_user_id)
+    meds = CareService(db).list_medicines_for_user(current_user=caregiver, target_user_id=target_user_id)
     return ApiResponse(data=[medicine_to_out(m) for m in meds])
 
 
 @router.post("/care/medicines", response_model=ApiResponse[MedicineOut])
 def create_medicine(
     body: MedicineCreateRequest,
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     m = CareService(db).create_medicine(
@@ -72,20 +86,31 @@ def create_medicine(
     return ApiResponse(data=medicine_to_out(m))
 
 
+@router.put("/care/medicines/{medicine_id}", response_model=ApiResponse[MedicineOut])
+def update_medicine(
+    medicine_id: int,
+    body: MedicineUpdateRequest,
+    caregiver: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    m = CareService(db).update_medicine(current_user=caregiver, medicine_id=medicine_id, payload=body)
+    return ApiResponse(data=medicine_to_out(m))
+
+
 @router.get("/care/plans", response_model=ApiResponse[List[PlanOut]])
 def list_plans(
     target_user_id: int = Query(..., ge=1),
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    plans = CareService(db).list_plans_for_personal(caregiver=caregiver, target_user_id=target_user_id)
+    plans = CareService(db).list_plans_for_user(current_user=caregiver, target_user_id=target_user_id)
     return ApiResponse(data=plans)
 
 
 @router.post("/care/plans", response_model=ApiResponse[PlanOut])
 def create_plan(
     body: PlanCreateRequest,
-    caregiver: User = Depends(require_personal),
+    caregiver: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     svc = CareService(db)
@@ -108,14 +133,39 @@ def create_plan(
             start_date=p.start_date,
             schedules_json=list(p.schedules_json or []),
             label=p.label,
+            created_at=p.created_at,
+            updated_at=p.updated_at,
         )
     )
 
 
-@router.get("/elder/medicines", response_model=ApiResponse[List[MedicineOut]])
-def list_medicines_for_elder_self(
+@router.get("/care/reminders", response_model=ApiResponse[List[ReminderOut]])
+def list_reminders(
+    target_user_id: int = Query(..., ge=1),
+    on_date: date = Query(..., description="查询哪一天，格式 YYYY-MM-DD"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    meds = CareService(db).list_medicines_for_elder(elder=current_user)
-    return ApiResponse(data=[medicine_to_out(m) for m in meds])
+    rows = CareService(db).list_today_reminders_for_user(
+        current_user=current_user,
+        target_user_id=target_user_id,
+        on_date=on_date,
+    )
+    return ApiResponse(data=rows)
+
+
+@router.post("/care/reminders/mark", response_model=ApiResponse[None])
+def mark_reminder(
+    body: ReminderMarkRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    CareService(db).mark_reminder(
+        current_user=current_user,
+        target_user_id=body.target_user_id,
+        plan_id=body.plan_id,
+        schedule_id=body.schedule_id,
+        due_time=body.due_time,
+        action=body.action,
+    )
+    return ApiResponse(message="ok")

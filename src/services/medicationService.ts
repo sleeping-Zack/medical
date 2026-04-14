@@ -1,111 +1,59 @@
+import { apiGetJson, apiPostJson, apiPutJson } from '../lib/api';
 import type {
   ElderBinding,
-  ElderManagerLink,
   Medication,
   MedicationPlan,
   ReminderEvent,
   UserProfile,
 } from '../types';
 
-/** 解析 YYYY-MM-DD 为本地零点，避免时区偏移 */
-function parseLocalDateYmd(ymd: string): Date {
-  const part = ymd.split('T')[0];
-  const [y, m, d] = part.split('-').map((x) => parseInt(x, 10));
-  return new Date(y || 1970, (m || 1) - 1, d || 1);
-}
-
-function sameLocalCalendarDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-}
-
-/** weekdaysMask 下标 0=周日 … 6=周六，与 Date#getDay() 一致 */
-function isWeekdayActive(d: Date, mask: string | undefined): boolean {
-  if (!mask || mask.length !== 7) return true;
-  return mask[d.getDay()] === '1';
-}
-
-/**
- * 按活跃计划为「今天」生成提醒（原逻辑只在创建计划当天写一次，第二天起列表为空，弹窗也不会再出）
- */
-function syncTodayRemindersFromPlans(userId: string, store: LocalStore): boolean {
-  const now = new Date();
-  const dayAnchor = new Date(now);
-  dayAnchor.setHours(0, 0, 0, 0);
-
-  let changed = false;
-  for (const plan of store.plans) {
-    if (plan.targetUserId !== userId) continue;
-    if (plan.status !== 'active') continue;
-
-    const start = plan.startDate ? parseLocalDateYmd(plan.startDate) : new Date(dayAnchor);
-    start.setHours(0, 0, 0, 0);
-    if (dayAnchor < start) continue;
-
-    if (plan.endDate) {
-      const end = parseLocalDateYmd(plan.endDate);
-      end.setHours(23, 59, 59, 999);
-      if (now > end) continue;
-    }
-
-    const med = store.medications.find((m) => m.id === plan.medicineId);
-    const medicineName = med?.name ?? '药品';
-
-    for (const sched of plan.schedules) {
-      if (!isWeekdayActive(now, sched.weekdaysMask)) continue;
-
-      const due = new Date(dayAnchor);
-      due.setHours(sched.hour ?? 0, sched.minute ?? 0, 0, 0);
-
-      const dup = store.reminders.some((r) => {
-        if (r.planId !== plan.id) return false;
-        const rt = new Date(r.dueTime);
-        return (
-          rt.getFullYear() === due.getFullYear() &&
-          rt.getMonth() === due.getMonth() &&
-          rt.getDate() === due.getDate() &&
-          rt.getHours() === due.getHours() &&
-          rt.getMinutes() === due.getMinutes()
-        );
-      });
-      if (dup) continue;
-
-      const createdAt = new Date().toISOString();
-      store.reminders.push({
-        id: newId(),
-        targetUserId: userId,
-        planId: plan.id,
-        scheduleId: sched.id || newId(),
-        dueTime: due.toISOString(),
-        status: 'pending',
-        medicineName,
-        createdAt,
-      });
-      changed = true;
-    }
-  }
-  return changed;
-}
-
 const REGISTRY_KEY = 'medapp_user_registry';
 
 interface Registry {
-  users: Record<
-    string,
-    {
-      phone: string;
-      shortId: string;
-      displayName: string;
-    }
-  >;
+  users: Record<string, { phone: string; shortId: string; displayName: string }>;
 }
 
-interface LocalStore {
-  medications: Medication[];
-  plans: MedicationPlan[];
-  reminders: ReminderEvent[];
-  bindings: ElderBinding[];
-  /** 绑定我的子女/看护人（长辈端展示用） */
-  managerLinks?: ElderManagerLink[];
+interface ServerMedicine {
+  id: number;
+  target_user_id: number;
+  name: string;
+  specification?: string | null;
+  note?: string | null;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ServerPlan {
+  id: number;
+  target_user_id: number;
+  medicine_id: number;
+  medicine_name: string;
+  status: 'active' | 'paused';
+  start_date: string;
+  schedules_json: Array<{ hour: number; minute: number; weekdays: string }>;
+  label?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ServerReminder {
+  id: string;
+  target_user_id: number;
+  plan_id: number;
+  schedule_id: string;
+  due_time: string;
+  status: 'pending' | 'taken' | 'deleted';
+  medicine_name: string;
+  created_at: string;
+  confirmed_at?: string | null;
+}
+
+interface ServerIncomingBinding {
+  caregiver_id: number;
+  short_id: string;
+  phone_masked: string;
+  role: string;
 }
 
 function loadRegistry(): Registry {
@@ -148,216 +96,118 @@ export function getProfileFromRegistry(uid: string): UserProfile | null {
   };
 }
 
-function storeKey(userId: string): string {
-  return `medapp_store_${userId}`;
+function toFrontendWeekdaysMask(weekdaysMonToSun: string): string {
+  if (!weekdaysMonToSun || weekdaysMonToSun.length !== 7) return '1111111';
+  return weekdaysMonToSun.slice(-1) + weekdaysMonToSun.slice(0, 6);
 }
 
-function emptyStore(): LocalStore {
-  return { medications: [], plans: [], reminders: [], bindings: [], managerLinks: [] };
+function toBackendWeekdays(maskSunToSat: string): string {
+  if (!maskSunToSat || maskSunToSat.length !== 7) return '1111111';
+  return maskSunToSat.slice(1) + maskSunToSat[0];
 }
 
-function normalizeStore(parsed: Partial<LocalStore>): LocalStore {
+function mapMedicine(row: ServerMedicine): Medication {
   return {
-    medications: parsed.medications ?? [],
-    plans: parsed.plans ?? [],
-    reminders: parsed.reminders ?? [],
-    bindings: parsed.bindings ?? [],
-    managerLinks: parsed.managerLinks ?? [],
+    id: String(row.id),
+    targetUserId: String(row.target_user_id),
+    createdByUserId: String(row.target_user_id),
+    name: row.name,
+    specification: row.specification || undefined,
+    dosageForm: 'other',
+    colorDesc: '',
+    shapeDesc: '',
+    note: row.note || undefined,
+    archived: row.archived,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
-function loadStore(userId: string): LocalStore {
-  try {
-    const raw = localStorage.getItem(storeKey(userId));
-    if (!raw) {
-      return emptyStore();
-    }
-    return normalizeStore(JSON.parse(raw) as Partial<LocalStore>);
-  } catch {
-    return emptyStore();
-  }
+function mapPlan(row: ServerPlan): MedicationPlan {
+  return {
+    id: String(row.id),
+    targetUserId: String(row.target_user_id),
+    createdByUserId: String(row.target_user_id),
+    medicineId: String(row.medicine_id),
+    status: row.status,
+    startDate: row.start_date,
+    note: row.label || undefined,
+    schedules: (row.schedules_json || []).map((s, idx) => ({
+      id: `${row.id}-${idx}`,
+      hour: s.hour,
+      minute: s.minute,
+      dosageAmount: 1,
+      dosageUnit: 'other',
+      weekdaysMask: toFrontendWeekdaysMask(s.weekdays),
+      graceMinutes: 30,
+      snoozeMinutes: 10,
+    })),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-/**
- * 从所有账号的 store 里找出「绑定本长辈」的记录，合并进长辈的 managerLinks。
- * 解决：绑定只写在子女 medapp_store 时，长辈端同浏览器能同步看到。
- */
-function syncElderManagerLinksFromAllStores(elderUserId: string): void {
-  const uidNorm = String(elderUserId);
-  const elderStore = loadStore(uidNorm);
-  const byBindingId = new Map<string, ElderManagerLink>();
-
-  for (const link of elderStore.managerLinks ?? []) {
-    byBindingId.set(String(link.bindingId), link);
-  }
-
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key?.startsWith('medapp_store_')) continue;
-    const managerUid = key.replace('medapp_store_', '');
-    if (managerUid === uidNorm) continue;
-
-    const store = loadStore(managerUid);
-    for (const b of store.bindings) {
-      if (!b.active || String(b.elderUserId) !== uidNorm) continue;
-      if (!byBindingId.has(b.id)) {
-        byBindingId.set(b.id, {
-          managerUserId: managerUid,
-          relationType: b.relationType || 'family',
-          createdAt: b.createdAt,
-          bindingId: b.id,
-        });
-      }
-    }
-  }
-
-  const merged = Array.from(byBindingId.values());
-  const prev = JSON.stringify(elderStore.managerLinks ?? []);
-  const next = JSON.stringify(merged);
-  if (prev !== next) {
-    elderStore.managerLinks = merged;
-    saveStore(uidNorm, elderStore);
-  }
-}
-
-function saveStore(userId: string, store: LocalStore): void {
-  localStorage.setItem(storeKey(userId), JSON.stringify(store));
-}
-
-function newId(): string {
-  return crypto.randomUUID();
+function dateYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = `${d.getMonth() + 1}`.padStart(2, '0');
+  const day = `${d.getDate()}`.padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 class MedicationService {
   testConnection(): void {
-    /* 无远程存储，跳过 */
+    /* no-op */
   }
 
-  async getBindings(userId: string): Promise<ElderBinding[]> {
-    const store = loadStore(userId);
-    return store.bindings.filter((b) => b.active);
+  async getBindings(_userId: string): Promise<ElderBinding[]> {
+    return [];
   }
 
-  async bindElder(managerUserId: string, shortId: string, phoneLast4: string): Promise<{ success: boolean; elderId: string }> {
-    const reg = loadRegistry();
-    let elderId: string | null = null;
-    for (const [uid, u] of Object.entries(reg.users)) {
-      if (u.shortId === shortId) {
-        elderId = uid;
-        break;
-      }
-    }
-    if (!elderId) throw new Error('未找到该 ID 的用户');
-
-    const elder = reg.users[elderId];
-    if (!elder.phone || !elder.phone.endsWith(phoneLast4)) {
-      throw new Error('手机尾号不匹配');
-    }
-    if (elderId === managerUserId) throw new Error('不能绑定自己');
-
-    const store = loadStore(managerUserId);
-    const exists = store.bindings.some(
-      (b) => b.managerUserId === managerUserId && b.elderUserId === elderId && b.active,
-    );
-    if (exists) throw new Error('已经绑定过该用户');
-
-    const binding: ElderBinding = {
-      id: newId(),
-      managerUserId,
-      elderUserId: elderId,
-      relationType: 'family',
-      canViewRecords: true,
-      canViewImages: true,
-      canReceiveAlerts: true,
-      canEditPlans: true,
-      active: true,
-      createdAt: new Date().toISOString(),
-    };
-    store.bindings.push(binding);
-    saveStore(managerUserId, store);
-
-    // 同步写入长辈端 store：长辈登录本机时可直接读取，无需再扫子女 store
-    const link: ElderManagerLink = {
-      managerUserId,
-      relationType: binding.relationType,
-      createdAt: binding.createdAt,
-      bindingId: binding.id,
-    };
-    const elderStore = loadStore(elderId);
-    const links = elderStore.managerLinks ?? [];
-    if (!links.some((l) => l.bindingId === link.bindingId || l.managerUserId === managerUserId)) {
-      elderStore.managerLinks = [...links, link];
-      saveStore(elderId, elderStore);
-    }
-
-    return { success: true, elderId };
+  async bindElder(_managerUserId: string, _shortId: string, _phoneLast4: string): Promise<{ success: boolean; elderId: string }> {
+    throw new Error('绑定能力已迁移到 careApi.createBinding');
   }
 
-  /**
-   * 长辈端：返回已绑定的子女/看护人（先合并全机扫描结果，再读 managerLinks）
-   */
-  getManagersForElder(elderUserId: string): { uid: string; name: string; phone: string; relation: string }[] {
-    syncElderManagerLinksFromAllStores(String(elderUserId));
-    const store = loadStore(String(elderUserId));
-    const list: { uid: string; name: string; phone: string; relation: string }[] = [];
-    const seen = new Set<string>();
-
-    for (const link of store.managerLinks ?? []) {
-      const mu = String(link.managerUserId);
-      if (seen.has(mu)) continue;
-      seen.add(mu);
-      const p = getProfileFromRegistry(mu);
-      list.push({
-        uid: mu,
-        name: p?.displayName || '家人',
-        phone: p?.phone || '',
-        relation: link.relationType === 'family' ? '家人' : link.relationType || '家人',
-      });
-    }
-    return list;
+  async getManagersForElder(_elderUserId: string): Promise<{ uid: string; name: string; phone: string; relation: string }[]> {
+    const rows = await apiGetJson<ServerIncomingBinding[]>('/api/v1/bindings/incoming');
+    return rows.map((r) => ({
+      uid: String(r.caregiver_id),
+      name: `家人（${r.phone_masked}）`,
+      phone: r.phone_masked,
+      relation: r.role === 'personal' ? '家人' : '看护',
+    }));
   }
 
   async getMedications(targetUserId: string): Promise<Medication[]> {
-    const store = loadStore(targetUserId);
-    return store.medications.filter((m) => !m.archived);
+    const rows = await apiGetJson<ServerMedicine[]>(`/api/v1/care/medicines?target_user_id=${encodeURIComponent(targetUserId)}`);
+    return rows.map(mapMedicine).filter((m) => !m.archived);
   }
 
   async getPlans(targetUserId: string): Promise<MedicationPlan[]> {
-    return loadStore(targetUserId).plans;
+    const rows = await apiGetJson<ServerPlan[]>(`/api/v1/care/plans?target_user_id=${encodeURIComponent(targetUserId)}`);
+    return rows.map(mapPlan);
   }
 
   async addMedication(med: Omit<Medication, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    const store = loadStore(med.targetUserId);
-    const id = newId();
-    const now = new Date().toISOString();
-    store.medications.push({
-      ...med,
-      id,
-      createdAt: now,
-      updatedAt: now,
-    });
-    saveStore(med.targetUserId, store);
-    return id;
+    const row = await apiPostJson<ServerMedicine>(
+      '/api/v1/care/medicines',
+      {
+        target_user_id: Number(med.targetUserId),
+        name: med.name,
+        specification: med.specification || null,
+        note: med.note || null,
+      },
+      true,
+    );
+    return String(row.id);
   }
 
   async updateMedication(id: string, updates: Partial<Medication>): Promise<void> {
-    /* 在所有 store 中查找（通常只有本人 targetUserId） */
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key?.startsWith('medapp_store_')) continue;
-      const userId = key.replace('medapp_store_', '');
-      const store = loadStore(userId);
-      const idx = store.medications.findIndex((m) => m.id === id);
-      if (idx >= 0) {
-        store.medications[idx] = {
-          ...store.medications[idx],
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-        saveStore(userId, store);
-        return;
-      }
-    }
+    await apiPutJson<ServerMedicine>(`/api/v1/care/medicines/${encodeURIComponent(id)}`, {
+      name: updates.name,
+      specification: updates.specification,
+      note: updates.note,
+      archived: updates.archived,
+    });
   }
 
   async deleteMedication(id: string): Promise<void> {
@@ -365,22 +215,27 @@ class MedicationService {
   }
 
   async getTodayReminders(targetUserId: string): Promise<ReminderEvent[]> {
-    const store = loadStore(targetUserId);
-    if (syncTodayRemindersFromPlans(targetUserId, store)) {
-      saveStore(targetUserId, store);
-    }
-    const today = new Date();
-    return store.reminders.filter(
-      (r) => r.targetUserId === targetUserId && sameLocalCalendarDay(new Date(r.dueTime), today),
+    const rows = await apiGetJson<ServerReminder[]>(
+      `/api/v1/care/reminders?target_user_id=${encodeURIComponent(targetUserId)}&on_date=${encodeURIComponent(dateYmd(new Date()))}`,
     );
+    return rows
+      .filter((r) => r.status !== 'deleted')
+      .map((r) => ({
+        id: r.id,
+        targetUserId: String(r.target_user_id),
+        planId: String(r.plan_id),
+        scheduleId: r.schedule_id,
+        dueTime: r.due_time,
+        status: r.status,
+        medicineName: r.medicine_name,
+        createdAt: r.created_at,
+        confirmedAt: r.confirmed_at || undefined,
+      }));
   }
 
   subscribeToTodayReminders(targetUserId: string, callback: (events: ReminderEvent[]) => void): () => void {
     const run = () => {
-      void this.getTodayReminders(targetUserId).then((events) => {
-        events.sort((a, b) => new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime());
-        callback(events);
-      });
+      void this.getTodayReminders(targetUserId).then(callback);
     };
     run();
     const id = window.setInterval(run, 3000);
@@ -388,91 +243,58 @@ class MedicationService {
   }
 
   async confirmIntake(eventId: string, _userId: string): Promise<void> {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key?.startsWith('medapp_store_')) continue;
-      const uid = key.replace('medapp_store_', '');
-      const store = loadStore(uid);
-      const idx = store.reminders.findIndex((r) => r.id === eventId);
-      if (idx >= 0) {
-        store.reminders[idx] = {
-          ...store.reminders[idx],
-          status: 'taken',
-          confirmedAt: new Date().toISOString(),
-        };
-        saveStore(uid, store);
-        return;
-      }
-    }
+    const [targetUserId, planId, scheduleId, dueTime] = eventId.split('|');
+    if (!targetUserId || !planId || !scheduleId || !dueTime) return;
+    await apiPostJson(
+      '/api/v1/care/reminders/mark',
+      {
+        target_user_id: Number(targetUserId),
+        plan_id: Number(planId),
+        schedule_id: scheduleId,
+        due_time: dueTime,
+        action: 'taken',
+      },
+      true,
+    );
   }
 
   async deleteReminder(eventId: string): Promise<void> {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key?.startsWith('medapp_store_')) continue;
-      const uid = key.replace('medapp_store_', '');
-      const store = loadStore(uid);
-      const idx = store.reminders.findIndex((r) => r.id === eventId);
-      if (idx >= 0) {
-        store.reminders.splice(idx, 1);
-        saveStore(uid, store);
-        return;
-      }
-    }
+    const [targetUserId, planId, scheduleId, dueTime] = eventId.split('|');
+    if (!targetUserId || !planId || !scheduleId || !dueTime) return;
+    await apiPostJson(
+      '/api/v1/care/reminders/mark',
+      {
+        target_user_id: Number(targetUserId),
+        plan_id: Number(planId),
+        schedule_id: scheduleId,
+        due_time: dueTime,
+        action: 'deleted',
+      },
+      true,
+    );
   }
 
   async addMedicationPlan(plan: Omit<MedicationPlan, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    const store = loadStore(plan.targetUserId);
-    const med = store.medications.find((m) => m.id === plan.medicineId);
-    const medicineName = med?.name ?? '药品';
-    const planId = newId();
-    const createdAt = new Date().toISOString();
-    const fullPlan: MedicationPlan = {
-      ...plan,
-      id: planId,
-      createdAt,
-      updatedAt: createdAt,
-    };
-    store.plans.push(fullPlan);
-
-    const now = new Date();
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    for (const schedule of plan.schedules) {
-      const dueTime = new Date(today);
-      dueTime.setHours(schedule.hour, schedule.minute, 0, 0);
-      if (dueTime.getTime() > now.getTime() - 5 * 60 * 1000) {
-        store.reminders.push({
-          id: newId(),
-          targetUserId: plan.targetUserId,
-          planId,
-          scheduleId: schedule.id || newId(),
-          dueTime: dueTime.toISOString(),
-          status: 'pending',
-          medicineName,
-          createdAt,
-        });
-      }
-    }
-    saveStore(plan.targetUserId, store);
-    return planId;
+    const row = await apiPostJson<ServerPlan>(
+      '/api/v1/care/plans',
+      {
+        target_user_id: Number(plan.targetUserId),
+        medicine_id: Number(plan.medicineId),
+        start_date: (plan.startDate || '').split('T')[0],
+        schedules: plan.schedules.map((s) => ({
+          hour: s.hour,
+          minute: s.minute,
+          weekdays: toBackendWeekdays(s.weekdaysMask),
+        })),
+        label: plan.note || null,
+      },
+      true,
+    );
+    return String(row.id);
   }
 
-  async addTestReminder(userId: string): Promise<void> {
-    const store = loadStore(userId);
-    const now = new Date();
-    const testTime = new Date(now.getTime() + 5000);
-    store.reminders.push({
-      id: newId(),
-      targetUserId: userId,
-      planId: 'test-plan',
-      scheduleId: 'test-schedule',
-      dueTime: testTime.toISOString(),
-      status: 'pending',
-      createdAt: now.toISOString(),
-    });
-    saveStore(userId, store);
+  async addTestReminder(_userId: string): Promise<void> {
+    return;
   }
 }
 

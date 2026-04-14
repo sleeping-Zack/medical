@@ -2,7 +2,8 @@
 
 这是一个完整的「家属端 + 老人端」登录注册基础工程，满足：
 
-- Flutter + Riverpod + go_router
+- **日常开发前端**：仓库根目录 **Vite + React**（`npm run dev`，默认 <http://127.0.0.1:3000>）
+- **可选移动端**：`production_stack/frontend` 为 **Flutter** + Riverpod + go_router
 - FastAPI + MySQL + Redis
 - JWT（access token + refresh token）
 - 中国大陆手机号 + 短信验证码 + 密码
@@ -27,6 +28,10 @@
 ## 工程结构
 
 ```text
+medical/（仓库根目录）
+  package.json              # Web 前端依赖与 npm run dev
+  src/                      # React 页面与业务（看护端 / 长辈端 Web）
+  vite.config.ts
 production_stack/
   backend/
     app/
@@ -155,7 +160,21 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 若报 `ValidationError: mysql_dsn Field required`，说明 **没有 `.env`** 或当前目录不对；确认在 `production_stack/backend` 下存在 `.env`。
 
-**3）前端（Flutter）**
+**3）前端（Vite + React，推荐）**
+
+在**仓库根目录**（含有 `package.json` 与 `production_stack/` 的那一层，即 `medical/`）执行。  
+若你上一步还在 `production_stack/backend`，需先回到根目录（PowerShell 下为 `cd ..\..`）：
+
+```bash
+cd ../..
+npm install
+npm run dev
+```
+
+浏览器打开：<http://127.0.0.1:3000>（脚本中为 `--port=3000 --host=0.0.0.0`）。  
+请求后端 API 默认指向 `http://127.0.0.1:8000`；若需改地址，在仓库根目录 `.env` 中设置 `VITE_API_BASE_URL`。
+
+**可选：Flutter 客户端**（`production_stack/frontend`）
 
 ```powershell
 cd production_stack/frontend
@@ -163,7 +182,7 @@ flutter pub get
 flutter run
 ```
 
-API 默认 `http://127.0.0.1:8000`；模拟器可用：
+模拟器访问本机后端时可使用：
 
 ```bash
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
@@ -297,24 +316,29 @@ curl -X POST http://127.0.0.1:8000/api/v1/auth/logout ^
 {"code":0,"message":"ok","data":null}
 ```
 
-## 前端启动（Flutter）
+## 前端启动
 
-生成的 Flutter 代码位于 `production_stack/frontend/lib/`。
+### Web（默认）
 
-如果你当前目录缺少平台工程（android/ios 等），可以在 `production_stack/frontend/` 下执行一次：
+在仓库根目录执行：
 
 ```bash
-flutter create .
+npm install
+npm run dev
 ```
 
-然后运行：
+访问 <http://127.0.0.1:3000>。后端地址默认 `http://127.0.0.1:8000`，可在根目录 `.env` 配置 `VITE_API_BASE_URL`。
+
+### Flutter（可选）
+
+代码位于 `production_stack/frontend/lib/`。若缺少 `android/`、`ios/` 等平台目录，可在 `production_stack/frontend/` 下执行一次 `flutter create .`，再：
 
 ```bash
 flutter pub get
 flutter run
 ```
 
-默认 API 地址为 `http://127.0.0.1:8000`，可通过编译参数覆盖：
+默认 API 为 `http://127.0.0.1:8000`，模拟器可用：
 
 ```bash
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
