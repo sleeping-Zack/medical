@@ -9,6 +9,7 @@ from app.models.base import Base
 class IntakeAction:
     TAKEN = "taken"
     DELETED = "deleted"
+    MISSED = "missed"
 
 
 class IntakeRecord(Base):

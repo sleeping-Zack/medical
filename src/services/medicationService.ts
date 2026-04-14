@@ -56,6 +56,13 @@ interface ServerIncomingBinding {
   role: string;
 }
 
+interface AdherencePoint {
+  date: string;
+  total: number;
+  taken: number;
+  rate: number;
+}
+
 function loadRegistry(): Registry {
   try {
     const raw = localStorage.getItem(REGISTRY_KEY);
@@ -233,6 +240,13 @@ class MedicationService {
       }));
   }
 
+  async getAdherenceTrend(targetUserId: string, days = 7): Promise<Array<{ date: string; rate: number; taken: number; total: number }>> {
+    const rows = await apiGetJson<AdherencePoint[]>(
+      `/api/v1/care/adherence?target_user_id=${encodeURIComponent(targetUserId)}&days=${encodeURIComponent(String(days))}`,
+    );
+    return rows.map((r) => ({ date: r.date, rate: r.rate, taken: r.taken, total: r.total }));
+  }
+
   subscribeToTodayReminders(targetUserId: string, callback: (events: ReminderEvent[]) => void): () => void {
     const run = () => {
       void this.getTodayReminders(targetUserId).then(callback);
@@ -269,6 +283,22 @@ class MedicationService {
         schedule_id: scheduleId,
         due_time: dueTime,
         action: 'deleted',
+      },
+      true,
+    );
+  }
+
+  async markMissedReminder(eventId: string): Promise<void> {
+    const [targetUserId, planId, scheduleId, dueTime] = eventId.split('|');
+    if (!targetUserId || !planId || !scheduleId || !dueTime) return;
+    await apiPostJson(
+      '/api/v1/care/reminders/mark',
+      {
+        target_user_id: Number(targetUserId),
+        plan_id: Number(planId),
+        schedule_id: scheduleId,
+        due_time: dueTime,
+        action: 'missed',
       },
       true,
     );

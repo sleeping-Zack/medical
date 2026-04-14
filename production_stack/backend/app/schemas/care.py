@@ -116,12 +116,19 @@ class ReminderMarkRequest(BaseModel):
     plan_id: int = Field(..., ge=1)
     schedule_id: str = Field(..., min_length=1, max_length=64)
     due_time: datetime
-    action: str = Field(..., description="taken 或 deleted")
+    action: str = Field(..., description="taken / deleted / missed")
 
     @field_validator("action")
     @classmethod
     def valid_action(cls, v: str) -> str:
         vv = (v or "").strip().lower()
-        if vv not in {"taken", "deleted"}:
-            raise ValueError("action 仅支持 taken 或 deleted")
+        if vv not in {"taken", "deleted", "missed"}:
+            raise ValueError("action 仅支持 taken / deleted / missed")
         return vv
+
+
+class AdherencePointOut(BaseModel):
+    date: date
+    total: int
+    taken: int
+    rate: int

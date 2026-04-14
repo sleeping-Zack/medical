@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.models.medicine import Medicine
 from app.models.user import User
 from app.schemas.care import (
+    AdherencePointOut,
     BindingCreateRequest,
     BoundCaregiverOut,
     BoundElderOut,
@@ -169,3 +170,18 @@ def mark_reminder(
         action=body.action,
     )
     return ApiResponse(message="ok")
+
+
+@router.get("/care/adherence", response_model=ApiResponse[List[AdherencePointOut]])
+def get_adherence_trend(
+    target_user_id: int = Query(..., ge=1),
+    days: int = Query(7, ge=1, le=30),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = CareService(db).list_adherence_trend(
+        current_user=current_user,
+        target_user_id=target_user_id,
+        days=days,
+    )
+    return ApiResponse(data=rows)

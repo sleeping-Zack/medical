@@ -50,14 +50,20 @@ function dosageLabel(rem: ReminderEvent, plans: MedicationPlan[]): string {
   return '按医嘱';
 }
 
-function buildWeeklyTrend(todayReminders: ReminderEvent[]) {
-  const taken = todayReminders.filter((r) => r.status === 'taken').length;
-  const total = todayReminders.length;
-  const todayRate = total > 0 ? Math.round((taken / total) * 100) : 72;
-  return weekLabels.map((label, i) => {
-    const isLast = i === 6;
-    const base = isLast ? todayRate : 55 + ((i * 7) % 35);
-    return { name: label, rate: Math.min(100, Math.max(20, base)) };
+function buildWeeklyTrendFromServer(rows: Array<{ date: string; rate: number; taken: number; total: number }>) {
+  if (!rows || rows.length === 0) {
+    return weekLabels.map((name) => ({ name, rate: 0, taken: 0, total: 0 }));
+  }
+  return rows.map((r) => {
+    const d = new Date(r.date);
+    const jsWeek = d.getDay();
+    const idx = jsWeek === 0 ? 6 : jsWeek - 1;
+    return {
+      name: weekLabels[idx],
+      rate: r.rate,
+      taken: r.taken,
+      total: r.total,
+    };
   });
 }
 
@@ -111,6 +117,9 @@ export function ElderHomeView({
   const [managers, setManagers] = useState<
     { uid: string; name: string; phone: string; relation: string }[]
   >([]);
+  const [weeklyData, setWeeklyData] = useState<Array<{ name: string; rate: number; taken: number; total: number }>>(
+    weekLabels.map((name) => ({ name, rate: 0, taken: 0, total: 0 })),
+  );
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 30_000);
@@ -135,6 +144,18 @@ export function ElderHomeView({
       document.removeEventListener('visibilitychange', onVis);
     };
   }, [user.uid]);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const rows = await medicationService.getAdherenceTrend(user.uid, 7);
+        setWeeklyData(buildWeeklyTrendFromServer(rows));
+      } catch {
+        setWeeklyData(weekLabels.map((name) => ({ name, rate: 0, taken: 0, total: 0 })));
+      }
+    };
+    void load();
+  }, [user.uid, reminders.length]);
 
   const sorted = useMemo(() => {
     return [...reminders].sort((a, b) => new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime());
@@ -173,7 +194,6 @@ export function ElderHomeView({
     return '下面按时间列好了今天的每一次，您慢慢看就好。';
   })();
 
-  const weeklyData = useMemo(() => buildWeeklyTrend(sorted), [sorted]);
   const tipIdx = now.getDate() % warmTips.length;
   const encourage =
     weeklyData[6].rate >= 90
@@ -461,15 +481,17 @@ export function ElderHomeView({
           {encourage}
         </p>
         <p className="text-base mt-2" style={{ color: warm.textSoft }}>
-          今天约 {weeklyData[6].rate}% · 点点曲线可看大致变化（演示数据会随今日完成率微调）
+          今天约 {weeklyData[6]?.rate ?? 0}% · 基于真实服药记录自动计算
         </p>
         <div className="h-52 w-full mt-4">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={weeklyData}>
               <defs>
                 <linearGradient id="elderRate" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#E8863D" stopOpacity={0.35} />
-                  <stop offset="95%" stopColor="#E8863D" stopOpacity={0.05} />
+                  <stop offset="0%" stopColor="#22c55e" stopOpacity={0.35} />
+                  <stop offset="35%" stopColor="#3b82f6" stopOpacity={0.28} />
+                  <stop offset="68%" stopColor="#ffffff" stopOpacity={0.22} />
+                  <stop offset="100%" stopColor="#ef4444" stopOpacity={0.24} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={warm.peach} />

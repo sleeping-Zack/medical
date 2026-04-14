@@ -10,7 +10,7 @@ from app.models.intake_record import IntakeAction, IntakeRecord
 from app.models.medicine import Medicine
 from app.models.medicine_plan import MedicinePlan, PlanStatus
 from app.models.user import User
-from app.schemas.care import MedicineOut, MedicineUpdateRequest, PlanOut, ReminderOut, ScheduleItem
+from app.schemas.care import AdherencePointOut, MedicineOut, MedicineUpdateRequest, PlanOut, ReminderOut, ScheduleItem
 
 
 class CareService:
@@ -185,6 +185,8 @@ class CareService:
                 if record:
                     if record.action == IntakeAction.DELETED:
                         status = "deleted"
+                    elif record.action == IntakeAction.MISSED:
+                        status = "missed"
                     else:
                         status = "taken"
                         confirmed_at = record.updated_at
@@ -247,6 +249,30 @@ class CareService:
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    def list_adherence_trend(
+        self,
+        *,
+        current_user: User,
+        target_user_id: int,
+        days: int = 7,
+    ) -> List[AdherencePointOut]:
+        safe_days = max(1, min(days, 30))
+        today = date.today()
+        out: List[AdherencePointOut] = []
+        for i in range(safe_days):
+            d = today - timedelta(days=(safe_days - 1 - i))
+            reminders = self.list_today_reminders_for_user(
+                current_user=current_user,
+                target_user_id=target_user_id,
+                on_date=d,
+            )
+            effective = [r for r in reminders if r.status != "deleted"]
+            total = len(effective)
+            taken = len([r for r in effective if r.status == "taken"])
+            rate = int(round((taken / total) * 100)) if total > 0 else 0
+            out.append(AdherencePointOut(date=d, total=total, taken=taken, rate=rate))
+        return out
 
 
 def medicine_to_out(m: Medicine) -> MedicineOut:

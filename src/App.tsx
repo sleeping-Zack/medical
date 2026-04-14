@@ -408,6 +408,12 @@ function AppContent() {
     setPlans(data);
   };
 
+  const refreshTodayReminders = async () => {
+    if (!user || !dataUserId) return;
+    const events = await medicationService.getTodayReminders(dataUserId);
+    setReminders(events);
+  };
+
   const loadBindings = async () => {
     if (!user) return;
     const rows = await listBindingsFromServer();
@@ -476,10 +482,28 @@ function AppContent() {
   const handleDeleteReminder = async (id: string) => {
     try {
       await medicationService.deleteReminder(id);
+      await refreshTodayReminders();
       setNotification({ message: '日程已删除', type: 'success' });
     } catch (error) {
       console.error("删除日程失败", error);
       setNotification({ message: '删除失败', type: 'error' });
+    }
+  };
+
+  const handleConfirmIntake = async (id: string) => {
+    if (!user) return;
+    await medicationService.confirmIntake(id, user.uid);
+    await refreshTodayReminders();
+  };
+
+  const handleMissReminder = async (id: string) => {
+    try {
+      await medicationService.markMissedReminder(id);
+      await refreshTodayReminders();
+      setNotification({ message: '已记为未服，今天不再提醒这一条', type: 'success' });
+    } catch (error) {
+      console.error("标记未服失败", error);
+      setNotification({ message: '操作失败，请重试', type: 'error' });
     }
   };
 
@@ -611,7 +635,7 @@ function AppContent() {
                     if (!activeReminder || !user) return;
                     setIsConfirmingIntake(true);
                     try {
-                      await medicationService.confirmIntake(activeReminder.id, user.uid);
+                      await handleConfirmIntake(activeReminder.id);
                       setActiveReminder(null);
                       setNotification({ message: '已确认服药', type: 'success' });
                     } catch (error) {
@@ -658,6 +682,28 @@ function AppContent() {
                   )}
                 >
                   10分钟后再说
+                </button>
+                <button
+                  disabled={isConfirmingIntake}
+                  onClick={async () => {
+                    if (!activeReminder) return;
+                    setIsConfirmingIntake(true);
+                    try {
+                      await handleMissReminder(activeReminder.id);
+                      setActiveReminder(null);
+                    } finally {
+                      setIsConfirmingIntake(false);
+                    }
+                  }}
+                  className={cn(
+                    'w-full py-4 rounded-3xl text-lg font-bold active:scale-95 transition-all',
+                    currentMode === 'elder'
+                      ? 'bg-white/15 text-white border border-white/30'
+                      : 'bg-[#FFE9C7] text-[#8B4513] border border-[#FFD79A]',
+                    isConfirmingIntake && 'opacity-50 cursor-not-allowed',
+                  )}
+                >
+                  今日不吃（不再提醒）
                 </button>
               </div>
             </motion.div>
@@ -744,7 +790,7 @@ function AppContent() {
               }}
               onDeleteMed={handleDeleteMed}
               onAddPlan={() => setShowPlanForm(true)}
-              onConfirmIntake={(id: string) => medicationService.confirmIntake(id, user.uid)}
+              onConfirmIntake={(id: string) => handleConfirmIntake(id)}
               onDeleteReminder={handleDeleteReminder}
               onBindElder={handleBindElder}
               bindings={bindings}
@@ -767,7 +813,7 @@ function AppContent() {
               plans={plans}
               snoozedReminders={snoozedReminders}
               setSnoozedReminders={setSnoozedReminders}
-              onConfirmIntake={(id) => medicationService.confirmIntake(id, user.uid)}
+              onConfirmIntake={(id) => handleConfirmIntake(id)}
               setNotification={setNotification}
               setView={setView}
               onLogout={logout}
@@ -1052,27 +1098,28 @@ function CaregiverView({
   const [bindShortId, setBindShortId] = useState('');
   const [bindPhoneLast4, setBindPhoneLast4] = useState('');
   const [isBinding, setIsBinding] = useState(false);
+  const [chartData, setChartData] = useState<{ name: string; rate: number }[]>([]);
 
-  // Prepare chart data
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    return d.toISOString().split('T')[0];
-  });
+  const reminderStatusKey = reminders.map((r: any) => `${r.id}:${r.status}`).join('|');
 
-  const chartData = last7Days.map(date => {
-    // In a real app, we'd fetch historical data. For now, we'll mock some based on current reminders if they match the date
-    // or just show a nice trend.
-    const dayReminders = reminders.filter((r: any) => r.dueTime.startsWith(date));
-    const takenCount = dayReminders.filter((r: any) => r.status === 'taken').length;
-    const totalCount = dayReminders.length;
-    const rate = totalCount > 0 ? Math.round((takenCount / totalCount) * 100) : Math.floor(Math.random() * 40) + 60;
-    
-    return {
-      name: date.split('-').slice(1).join('/'),
-      rate: rate
+  useEffect(() => {
+    const loadAdherence = async () => {
+      if (!careTargetUserId) return;
+      try {
+        const rows = await medicationService.getAdherenceTrend(careTargetUserId, 7);
+        setChartData(
+          rows.map((r) => {
+            const dt = new Date(r.date);
+            const name = `${dt.getMonth() + 1}/${dt.getDate()}`;
+            return { name, rate: r.rate };
+          }),
+        );
+      } catch {
+        setChartData([]);
+      }
     };
-  });
+    void loadAdherence();
+  }, [careTargetUserId, reminderStatusKey]);
 
   const careTargetLabel =
     careTargetOptions.find((o: any) => o.id === careTargetUserId)?.label || '本人';
@@ -1214,7 +1261,7 @@ function CaregiverView({
                           rem.status === 'taken' ? 'bg-[#7CB87C] text-white' : 'bg-[#FFE4CC] text-[#8B4513]',
                         )}
                       >
-                        {rem.status === 'taken' ? '已服' : '待服'}
+                        {rem.status === 'taken' ? '已服' : rem.status === 'missed' ? '未服' : '待服'}
                       </div>
                     </div>
                   </div>
@@ -1349,11 +1396,11 @@ function CaregiverView({
             <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-[#FFB366]/15 rounded-full blur-3xl" />
           </div>
 
-          <div className="bg-white/95 p-6 rounded-[32px] shadow-lg border border-[#FFE4CC]/80 space-y-5">
+          <div className="bg-gradient-to-br from-[#FFF7EE] via-[#FFECD8]/85 to-[#FFE3C9]/75 p-6 rounded-[32px] shadow-lg border border-[#FFDDBE]/90 space-y-5">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h3 className="font-extrabold text-[#5C4A3D] text-lg">服药依从性</h3>
-                <p className="text-sm text-[#8B7A6E] font-medium mt-0.5">过去 7 天完成率（示意曲线）</p>
+                <p className="text-sm text-[#8B7A6E] font-medium mt-0.5">过去 7 天完成率</p>
               </div>
               <div className="bg-[#7CB87C]/15 text-[#3d6b3d] px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 border border-[#7CB87C]/25">
                 <TrendingUp className="w-3.5 h-3.5" />
@@ -1366,11 +1413,13 @@ function CaregiverView({
                 <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorRateCare" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#E8863D" stopOpacity={0.35} />
-                      <stop offset="95%" stopColor="#E8863D" stopOpacity={0.02} />
+                      <stop offset="0%" stopColor="#22c55e" stopOpacity={0.4} />
+                      <stop offset="35%" stopColor="#3b82f6" stopOpacity={0.34} />
+                      <stop offset="68%" stopColor="#ffffff" stopOpacity={0.24} />
+                      <stop offset="100%" stopColor="#ef4444" stopOpacity={0.3} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#FFE4CC" />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#FFD9BA" />
                   <XAxis
                     dataKey="name"
                     axisLine={false}
