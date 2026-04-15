@@ -19,6 +19,7 @@ from app.schemas.care import (
     PlanCreateRequest,
     PlanOut,
     ReminderMarkRequest,
+    ReminderSnoozeRequest,
     ReminderOut,
 )
 from app.schemas.common import ApiResponse
@@ -168,6 +169,25 @@ def mark_reminder(
         schedule_id=body.schedule_id,
         due_time=body.due_time,
         action=body.action,
+        action_source=body.action_source,
+    )
+    return ApiResponse(message="ok")
+
+
+@router.post("/care/reminders/snooze", response_model=ApiResponse[None])
+def snooze_reminder(
+    body: ReminderSnoozeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    CareService(db).snooze_reminder(
+        current_user=current_user,
+        target_user_id=body.target_user_id,
+        plan_id=body.plan_id,
+        schedule_id=body.schedule_id,
+        due_time=body.due_time,
+        snooze_minutes=body.snooze_minutes,
+        action_source=body.action_source,
     )
     return ApiResponse(message="ok")
 

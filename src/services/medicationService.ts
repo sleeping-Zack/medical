@@ -43,10 +43,12 @@ interface ServerReminder {
   plan_id: number;
   schedule_id: string;
   due_time: string;
-  status: 'pending' | 'taken' | 'deleted';
+  status: 'pending' | 'taken' | 'deleted' | 'missed' | 'snoozed';
   medicine_name: string;
   created_at: string;
   confirmed_at?: string | null;
+  snooze_until?: string | null;
+  action_source?: string | null;
 }
 
 interface ServerIncomingBinding {
@@ -237,6 +239,7 @@ class MedicationService {
         medicineName: r.medicine_name,
         createdAt: r.created_at,
         confirmedAt: r.confirmed_at || undefined,
+        snoozeUntil: r.snooze_until || undefined,
       }));
   }
 
@@ -299,6 +302,23 @@ class MedicationService {
         schedule_id: scheduleId,
         due_time: dueTime,
         action: 'missed',
+      },
+      true,
+    );
+  }
+
+  async snoozeReminder(eventId: string, snoozeMinutes = 10): Promise<void> {
+    const [targetUserId, planId, scheduleId, dueTime] = eventId.split('|');
+    if (!targetUserId || !planId || !scheduleId || !dueTime) return;
+    await apiPostJson(
+      '/api/v1/care/reminders/snooze',
+      {
+        target_user_id: Number(targetUserId),
+        plan_id: Number(planId),
+        schedule_id: scheduleId,
+        due_time: dueTime,
+        snooze_minutes: snoozeMinutes,
+        action_source: 'app',
       },
       true,
     );

@@ -40,7 +40,7 @@ import { MedicationForm } from './components/MedicationForm';
 import { PlanForm } from './components/PlanForm';
 import { AuthScreen } from './components/AuthScreen';
 import { ElderHomeView } from './components/ElderHomeView';
-import { medicationService, syncProfileToRegistry } from './services/medicationService';
+import { medicationService, syncProfileToRegistry } from '../src/services/medicationService';
 
 /** 已登录用户（对接 JWT 后端，uid 为后端用户数字 id 的字符串） */
 export interface AuthUser {
@@ -314,9 +314,7 @@ function AppContent() {
         const isDue = new Date(r.dueTime) <= now;
         const isNotTooOld =
           now.getTime() - new Date(r.dueTime).getTime() < 24 * 60 * 60 * 1000;
-        const snoozeTime = snoozedReminders.get(r.id);
-        const isSnoozeOver = !snoozeTime || now.getTime() > snoozeTime;
-        return isPending && isNotDismissed && isDue && isNotTooOld && isSnoozeOver;
+        return isPending && isNotDismissed && isDue && isNotTooOld;
       });
 
       setActiveReminder((prev) => {
@@ -339,7 +337,7 @@ function AppContent() {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [reminders, dismissedReminderIds, snoozedReminders, user]);
+  }, [reminders, dismissedReminderIds, user]);
 
   useEffect(() => {
     if (profile) {
@@ -665,13 +663,20 @@ function AppContent() {
                 </button>
                 <button 
                   disabled={isConfirmingIntake}
-                  onClick={() => {
-                    if (activeReminder) {
-                      // Snooze for 10 minutes
-                      const nextTime = Date.now() + 10 * 60 * 1000;
-                      setSnoozedReminders(prev => new Map(prev).set(activeReminder.id, nextTime));
+                  onClick={async () => {
+                    if (!activeReminder) return;
+                    setIsConfirmingIntake(true);
+                    try {
+                      await medicationService.snoozeReminder(activeReminder.id, 10);
+                      await refreshTodayReminders();
+                      setActiveReminder(null);
+                      setNotification({ message: '已延后 10 分钟，稍后再提醒', type: 'success' });
+                    } catch (error) {
+                      console.error("延后提醒失败", error);
+                      setNotification({ message: '操作失败，请重试', type: 'error' });
+                    } finally {
+                      setIsConfirmingIntake(false);
                     }
-                    setActiveReminder(null);
                   }}
                   className={cn(
                     'w-full py-4 rounded-3xl text-lg font-bold active:scale-95 transition-all',

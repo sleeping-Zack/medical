@@ -10,6 +10,7 @@ class IntakeAction:
     TAKEN = "taken"
     DELETED = "deleted"
     MISSED = "missed"
+    SNOOZED = "snoozed"
 
 
 class IntakeRecord(Base):
@@ -31,6 +32,8 @@ class IntakeRecord(Base):
     schedule_id: Mapped[str] = mapped_column(String(64), nullable=False)
     due_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(16), nullable=False, default=IntakeAction.TAKEN, server_default=IntakeAction.TAKEN)
+    snooze_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    action_source: Mapped[str | None] = mapped_column(String(32), nullable=True, default="app", server_default="app")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

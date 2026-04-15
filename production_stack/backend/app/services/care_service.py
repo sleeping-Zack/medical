@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import List, Optional
 
 from sqlalchemy import select
@@ -30,6 +30,15 @@ class CareService:
         ).scalar_one_or_none()
         if not binding:
             raise forbidden("无权限为该用户维护药品与计划，请先完成绑定并确认代管权限")
+
+    @staticmethod
+    def _to_utc_naive(dt: datetime | None) -> datetime | None:
+        """统一时间比较口径：全部转成 UTC naive，避免 aware/naive 混比。"""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     def create_medicine(
         self,
@@ -187,6 +196,13 @@ class CareService:
                         status = "deleted"
                     elif record.action == IntakeAction.MISSED:
                         status = "missed"
+                    elif record.action == IntakeAction.SNOOZED:
+                        snooze_until = self._to_utc_naive(record.snooze_until)
+                        now_utc_naive = datetime.utcnow()
+                        if snooze_until and snooze_until > now_utc_naive:
+                            status = "snoozed"
+                        else:
+                            status = "pending"
                     else:
                         status = "taken"
                         confirmed_at = record.updated_at
@@ -201,6 +217,8 @@ class CareService:
                         medicine_name=m.name,
                         created_at=now,
                         confirmed_at=confirmed_at,
+                        snooze_until=record.snooze_until if record else None,
+                        action_source=record.action_source if record else None,
                     )
                 )
 
@@ -216,6 +234,7 @@ class CareService:
         schedule_id: str,
         due_time: datetime,
         action: str,
+        action_source: str | None = None,
     ) -> IntakeRecord:
         self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
         plan = self.db.get(MedicinePlan, plan_id)
@@ -231,7 +250,9 @@ class CareService:
         ).scalar_one_or_none()
         if row:
             row.action = action
+            row.snooze_until = None
             row.confirmed_by_user_id = current_user.id
+            row.action_source = action_source or "app"
             self.db.add(row)
             self.db.commit()
             self.db.refresh(row)
@@ -244,6 +265,57 @@ class CareService:
             schedule_id=schedule_id,
             due_time=due_time,
             action=action,
+            action_source=action_source or "app",
+        )
+        self.db.add(row)
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def snooze_reminder(
+        self,
+        *,
+        current_user: User,
+        target_user_id: int,
+        plan_id: int,
+        schedule_id: str,
+        due_time: datetime,
+        snooze_minutes: int,
+        action_source: str | None = None,
+    ) -> IntakeRecord:
+        self._assert_user_can_manage_target(current_user=current_user, target_user_id=target_user_id)
+        plan = self.db.get(MedicinePlan, plan_id)
+        if not plan or plan.target_user_id != target_user_id:
+            raise not_found("提醒对应计划不存在")
+
+        snooze_until = datetime.now(timezone.utc) + timedelta(minutes=snooze_minutes)
+        row = self.db.execute(
+            select(IntakeRecord).where(
+                IntakeRecord.target_user_id == target_user_id,
+                IntakeRecord.plan_id == plan_id,
+                IntakeRecord.schedule_id == schedule_id,
+                IntakeRecord.due_time == due_time,
+            )
+        ).scalar_one_or_none()
+        if row:
+            row.action = IntakeAction.SNOOZED
+            row.snooze_until = snooze_until
+            row.confirmed_by_user_id = current_user.id
+            row.action_source = action_source or "app"
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            return row
+
+        row = IntakeRecord(
+            target_user_id=target_user_id,
+            confirmed_by_user_id=current_user.id,
+            plan_id=plan_id,
+            schedule_id=schedule_id,
+            due_time=due_time,
+            action=IntakeAction.SNOOZED,
+            snooze_until=snooze_until,
+            action_source=action_source or "app",
         )
         self.db.add(row)
         self.db.commit()

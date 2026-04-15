@@ -109,6 +109,8 @@ class ReminderOut(BaseModel):
     medicine_name: str
     created_at: datetime
     confirmed_at: Optional[datetime] = None
+    snooze_until: Optional[datetime] = None
+    action_source: Optional[str] = None
 
 
 class ReminderMarkRequest(BaseModel):
@@ -117,6 +119,7 @@ class ReminderMarkRequest(BaseModel):
     schedule_id: str = Field(..., min_length=1, max_length=64)
     due_time: datetime
     action: str = Field(..., description="taken / deleted / missed")
+    action_source: Optional[str] = Field(default="app", max_length=32)
 
     @field_validator("action")
     @classmethod
@@ -132,3 +135,12 @@ class AdherencePointOut(BaseModel):
     total: int
     taken: int
     rate: int
+
+
+class ReminderSnoozeRequest(BaseModel):
+    target_user_id: int = Field(..., ge=1)
+    plan_id: int = Field(..., ge=1)
+    schedule_id: str = Field(..., min_length=1, max_length=64)
+    due_time: datetime
+    snooze_minutes: int = Field(default=10, ge=1, le=180)
+    action_source: Optional[str] = Field(default="app", max_length=32)

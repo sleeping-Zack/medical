@@ -76,13 +76,12 @@ function greeting(hour: number) {
 
 function statusLabel(
   r: ReminderEvent,
-  snoozedUntil: number | undefined,
+  _snoozedUntil: number | undefined,
   now: number,
 ): { text: string; className: string } {
   if (r.status === 'taken') return { text: '已服下 ✓', className: 'bg-emerald-100 text-emerald-800' };
+  if (r.status === 'snoozed') return { text: '已延后', className: 'bg-sky-100 text-sky-900' };
   if (r.status === 'missed') return { text: '没赶上，别太担心', className: 'bg-rose-100 text-rose-800' };
-  if (snoozedUntil && now < snoozedUntil)
-    return { text: '稍后再服', className: 'bg-sky-100 text-sky-900' };
   const due = new Date(r.dueTime).getTime();
   if (now > due + 60 * 60 * 1000) return { text: '待处理', className: 'bg-amber-100 text-amber-900' };
   return { text: '待服用', className: 'bg-amber-50 text-amber-900' };
@@ -170,8 +169,6 @@ export function ElderHomeView({
   const ts = now.getTime();
   const nextPending = sorted.find((r) => {
     if (r.status !== 'pending') return false;
-    const sn = snoozedReminders.get(r.id);
-    if (sn && ts < sn) return false;
     return true;
   });
 
@@ -219,8 +216,10 @@ export function ElderHomeView({
 
   const handleSnooze = () => {
     if (!nextPending) return;
-    setSnoozedReminders((prev) => new Map(prev).set(nextPending.id, Date.now() + 10 * 60 * 1000));
-    setNotification({ message: '好的，稍后再提醒您～', type: 'success' });
+    void medicationService
+      .snoozeReminder(nextPending.id, 10)
+      .then(() => setNotification({ message: '好的，稍后再提醒您～', type: 'success' }))
+      .catch(() => setNotification({ message: '操作失败，请重试', type: 'error' }));
   };
 
   const timeStr = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });

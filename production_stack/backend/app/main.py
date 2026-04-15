@@ -35,6 +35,33 @@ def _ensure_users_short_id_column() -> None:
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_short_id ON users (short_id)"))
 
 
+def _ensure_intake_records_columns() -> None:
+    """旧库缺列时补齐 intake_records 的扩展字段。"""
+    insp = inspect(engine)
+    if "intake_records" not in insp.get_table_names():
+        return
+    col_names = {c["name"] for c in insp.get_columns("intake_records")}
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if "snooze_until" not in col_names:
+            if dialect == "mysql":
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN snooze_until DATETIME NULL"))
+                conn.execute(text("CREATE INDEX ix_intake_records_snooze_until ON intake_records (snooze_until)"))
+            elif dialect in {"postgresql", "postgres"}:
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMP NULL"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intake_records_snooze_until ON intake_records (snooze_until)"))
+            elif dialect == "sqlite":
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN snooze_until DATETIME"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intake_records_snooze_until ON intake_records (snooze_until)"))
+        if "action_source" not in col_names:
+            if dialect == "mysql":
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN action_source VARCHAR(32) NULL DEFAULT 'app'"))
+            elif dialect in {"postgresql", "postgres"}:
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN IF NOT EXISTS action_source VARCHAR(32) NULL DEFAULT 'app'"))
+            elif dialect == "sqlite":
+                conn.execute(text("ALTER TABLE intake_records ADD COLUMN action_source VARCHAR(32)"))
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="MedApp API", version="1.0.0")
 
@@ -71,6 +98,7 @@ def create_app() -> FastAPI:
     def _startup():
         Base.metadata.create_all(bind=engine)
         _ensure_users_short_id_column()
+        _ensure_intake_records_columns()
         db = SessionLocal()
         try:
             UserRepository(db).backfill_missing_short_ids()
