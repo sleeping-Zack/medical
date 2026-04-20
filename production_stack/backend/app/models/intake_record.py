@@ -11,6 +11,7 @@ class IntakeAction:
     DELETED = "deleted"
     MISSED = "missed"
     SNOOZED = "snoozed"
+    SKIPPED = "skipped"
 
 
 class IntakeRecord(Base):

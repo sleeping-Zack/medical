@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 class ApiClient {
   ApiClient({required String baseUrl})
@@ -12,6 +13,17 @@ class ApiClient {
             validateStatus: (status) => status != null && status < 500,
           ),
         ) {
+    debugPrint('[api] ApiClient baseUrl=$baseUrl');
+    assert(() {
+      final u = baseUrl.toLowerCase();
+      if (u.contains('127.0.0.1') || u.contains('localhost')) {
+        debugPrint(
+          '[api] 当前为本机地址：Android 模拟器请用 --dart-define=API_BASE_URL=http://10.0.2.2:8000；'
+          'USB/真机请用电脑在同一 WiFi 下的局域网 IP，例如 http://192.168.1.5:8000',
+        );
+      }
+      return true;
+    }());
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
@@ -19,7 +31,30 @@ class ApiClient {
           if (accessToken != null && accessToken.isNotEmpty) {
             options.headers['Authorization'] = 'Bearer $accessToken';
           }
+          final p = options.path;
+          if (p.contains('/api/v1/care/')) {
+            debugPrint('[care-api] --> ${options.method} $p query=${options.queryParameters}');
+          }
           handler.next(options);
+        },
+        onResponse: (response, handler) {
+          final p = response.requestOptions.path;
+          if (p.contains('/api/v1/care/')) {
+            final d = response.data;
+            var biz = '';
+            if (d is Map && d.containsKey('code')) {
+              biz = ' code=${d['code']} message=${d['message']}';
+            }
+            debugPrint('[care-api] <-- HTTP ${response.statusCode} $p$biz');
+          }
+          handler.next(response);
+        },
+        onError: (e, handler) {
+          final ro = e.requestOptions;
+          if (ro.path.contains('/api/v1/care/')) {
+            debugPrint('[care-api] xx ${ro.method} ${ro.path} error=$e');
+          }
+          handler.next(e);
         },
       ),
     );

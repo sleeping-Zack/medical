@@ -139,10 +139,13 @@ class ElderTodayRecordsSection extends StatelessWidget {
 
   Widget _statusChip(IntakeRecordStatus s) {
     final (label, bg, fg) = switch (s) {
+      IntakeRecordStatus.notified => ('已提醒，待处理', ElderHomeColors.gentleAmber.withValues(alpha: 0.45), ElderHomeColors.textWarm),
       IntakeRecordStatus.taken => ('已服下 ✓', ElderHomeColors.successLeaf.withValues(alpha: 0.25), ElderHomeColors.sageDeep),
       IntakeRecordStatus.snoozed => ('稍后再服', ElderHomeColors.softBlue.withValues(alpha: 0.45), ElderHomeColors.textWarm),
       IntakeRecordStatus.missed => ('没赶上，别太担心', ElderHomeColors.softPink.withValues(alpha: 0.6), ElderHomeColors.deepApricot),
+      IntakeRecordStatus.skipped => ('今日不吃', ElderHomeColors.peach.withValues(alpha: 0.55), ElderHomeColors.deepApricot),
       IntakeRecordStatus.pending => ('待服用', ElderHomeColors.gentleAmber.withValues(alpha: 0.4), ElderHomeColors.textWarm),
+      IntakeRecordStatus.deleted => ('已删除', ElderHomeColors.peach.withValues(alpha: 0.45), ElderHomeColors.textSoft),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -192,10 +195,13 @@ class ElderTodayRecordsSection extends StatelessWidget {
 
   String _statusIcon(IntakeRecordStatus s) {
     return switch (s) {
+      IntakeRecordStatus.notified => '🔔',
       IntakeRecordStatus.taken => '✅',
       IntakeRecordStatus.snoozed => '⏳',
       IntakeRecordStatus.missed => '🌿',
+      IntakeRecordStatus.skipped => '⏭️',
       IntakeRecordStatus.pending => '☀️',
+      IntakeRecordStatus.deleted => '🗑️',
     };
   }
 }

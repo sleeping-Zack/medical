@@ -125,8 +125,8 @@ class ReminderMarkRequest(BaseModel):
     @classmethod
     def valid_action(cls, v: str) -> str:
         vv = (v or "").strip().lower()
-        if vv not in {"taken", "deleted", "missed"}:
-            raise ValueError("action 仅支持 taken / deleted / missed")
+        if vv not in {"taken", "deleted", "missed", "skipped"}:
+            raise ValueError("action 仅支持 taken / deleted / missed / skipped")
         return vv
 
 

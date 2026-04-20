@@ -1,5 +1,6 @@
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +12,9 @@ from app.models.medicine import Medicine
 from app.models.medicine_plan import MedicinePlan, PlanStatus
 from app.models.user import User
 from app.schemas.care import AdherencePointOut, MedicineOut, MedicineUpdateRequest, PlanOut, ReminderOut, ScheduleItem
+
+# 与客户端「按本地日历日查询」对齐：按中国时区生成当日 0 点与各剂次时刻，再与 DB timestamptz 比较
+_TZ_SH = ZoneInfo("Asia/Shanghai")
 
 
 class CareService:
@@ -164,7 +168,7 @@ class CareService:
             .order_by(MedicinePlan.id.desc())
         ).all()
 
-        day_start = datetime.combine(on_date, time.min)
+        day_start = datetime.combine(on_date, time.min, tzinfo=_TZ_SH)
         day_end = day_start + timedelta(days=1)
         intake_rows = self.db.execute(
             select(IntakeRecord).where(
@@ -173,7 +177,13 @@ class CareService:
                 IntakeRecord.due_time < day_end,
             )
         ).scalars().all()
-        by_event_key = {(r.plan_id, r.schedule_id, r.due_time): r for r in intake_rows}
+
+        def _due_utc_key(dt: datetime) -> datetime:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).replace(microsecond=0)
+
+        by_event_key = {(r.plan_id, r.schedule_id, _due_utc_key(r.due_time)): r for r in intake_rows}
 
         out: List[ReminderOut] = []
         weekday_idx = on_date.weekday()  # Monday=0 ... Sunday=6
@@ -186,9 +196,10 @@ class CareService:
                     continue
                 hour = int(sched.get("hour", 0))
                 minute = int(sched.get("minute", 0))
-                due = datetime.combine(on_date, time(hour=hour, minute=minute))
+                due = datetime.combine(on_date, time(hour=hour, minute=minute), tzinfo=_TZ_SH)
+                due_utc = due.astimezone(timezone.utc)
                 schedule_id = f"{p.id}-{idx}"
-                record = by_event_key.get((p.id, schedule_id, due))
+                record = by_event_key.get((p.id, schedule_id, _due_utc_key(due)))
                 status = "pending"
                 confirmed_at = None
                 if record:
@@ -196,6 +207,8 @@ class CareService:
                         status = "deleted"
                     elif record.action == IntakeAction.MISSED:
                         status = "missed"
+                    elif record.action == IntakeAction.SKIPPED:
+                        status = "skipped"
                     elif record.action == IntakeAction.SNOOZED:
                         snooze_until = self._to_utc_naive(record.snooze_until)
                         now_utc_naive = datetime.utcnow()
@@ -208,11 +221,11 @@ class CareService:
                         confirmed_at = record.updated_at
                 out.append(
                     ReminderOut(
-                        id=f"{target_user_id}|{p.id}|{schedule_id}|{due.isoformat()}",
+                        id=f"{target_user_id}|{p.id}|{schedule_id}|{due_utc.isoformat()}",
                         target_user_id=p.target_user_id,
                         plan_id=p.id,
                         schedule_id=schedule_id,
-                        due_time=due,
+                        due_time=due_utc,
                         status=status,
                         medicine_name=m.name,
                         created_at=now,

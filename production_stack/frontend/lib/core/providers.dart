@@ -8,7 +8,7 @@ import '../features/care/repositories/care_repository.dart';
 
 const String kApiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
-  defaultValue: 'http://127.0.0.1:8000',
+  defaultValue: 'http://47.116.25.89:8000',
 );
 
 final secureStorageProvider = Provider<FlutterSecureStorage>((ref) {

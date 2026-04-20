@@ -1,27 +1,39 @@
 /// 长辈端首页数据模型（可与后端 DTO 对齐）
 
 enum IntakeRecordStatus {
+  /// 已触发提醒
+  notified,
   /// 已服下
   taken,
   /// 已选择稍后再服
   snoozed,
   /// 已过计划时间未完成（柔和展示，非医疗判定）
   missed,
+  /// 今日本次跳过
+  skipped,
   /// 尚未到点
   pending,
+  /// 本次提醒已删除（通常不展示）
+  deleted,
 }
 
 extension IntakeRecordStatusX on IntakeRecordStatus {
   String get friendlyLabel {
     switch (this) {
+      case IntakeRecordStatus.notified:
+        return '已提醒';
       case IntakeRecordStatus.taken:
         return '已服下';
       case IntakeRecordStatus.snoozed:
         return '稍后再服';
       case IntakeRecordStatus.missed:
         return '未按时';
+      case IntakeRecordStatus.skipped:
+        return '今日跳过';
       case IntakeRecordStatus.pending:
         return '待服用';
+      case IntakeRecordStatus.deleted:
+        return '已删除';
     }
   }
 }
@@ -30,17 +42,25 @@ extension IntakeRecordStatusX on IntakeRecordStatus {
 class ElderTodayIntakeRecord {
   const ElderTodayIntakeRecord({
     required this.id,
+    required this.targetUserId,
+    required this.planId,
+    required this.scheduleId,
     required this.scheduledTime,
     required this.medicineName,
     required this.dosageLabel,
     required this.status,
+    this.snoozeUntil,
   });
 
   final String id;
+  final int targetUserId;
+  final int planId;
+  final String scheduleId;
   final DateTime scheduledTime;
   final String medicineName;
   final String dosageLabel;
   final IntakeRecordStatus status;
+  final DateTime? snoozeUntil;
 }
 
 /// 主卡片状态

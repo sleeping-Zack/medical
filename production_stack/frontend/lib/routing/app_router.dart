@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../features/auth/pages/auth_screen_page.dart';
 import '../features/auth/pages/forgot_password_page.dart';
-import '../features/auth/pages/login_page.dart';
-import '../features/auth/pages/register_page.dart';
 import '../features/auth/providers/auth_controller.dart';
 import '../features/auth/providers/auth_state.dart';
 import '../features/care/pages/bind_elder_page.dart';
@@ -13,14 +12,19 @@ import '../features/care/pages/medicine_create_page.dart';
 import '../features/care/pages/medicine_list_page.dart';
 import '../features/care/pages/plan_create_page.dart';
 import '../features/care/pages/plan_list_page.dart';
+import '../features/care/pages/reminder_assurance_page.dart';
 import '../features/elder_home/elder_home_page.dart';
 import '../features/elder_home/pages/elder_placeholder_page.dart';
+import '../features/elder_home/pages/elder_reminder_action_page.dart';
 import '../features/home/home_page.dart';
 import '../features/splash/splash_page.dart';
+
+final rootNavigatorKey = GlobalKey<NavigatorState>();
 
 final goRouterProvider = Provider<GoRouter>((ref) {
   final notifier = RouterNotifier(ref);
   return GoRouter(
+    navigatorKey: rootNavigatorKey,
     initialLocation: '/splash',
     refreshListenable: notifier,
     redirect: (context, state) {
@@ -51,11 +55,14 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/login',
-        builder: (context, state) => const LoginPage(),
+        builder: (context, state) {
+          final reg = state.uri.queryParameters['register'] == '1' || state.uri.queryParameters['mode'] == 'register';
+          return AuthScreenPage(initialRegister: reg);
+        },
       ),
       GoRoute(
         path: '/register',
-        builder: (context, state) => const RegisterPage(),
+        redirect: (context, state) => '/login?register=1',
       ),
       GoRoute(
         path: '/forgot-password',
@@ -85,8 +92,25 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         ),
       ),
       GoRoute(
+        path: '/elder/reminder/:id',
+        pageBuilder: (context, state) {
+          final id = Uri.decodeComponent(state.pathParameters['id'] ?? '');
+          return MaterialPage<void>(
+            fullscreenDialog: true,
+            name: state.name,
+            arguments: state.extra,
+            key: state.pageKey,
+            child: ElderReminderActionPage(reminderId: id),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/elder/reminder-assurance',
+        builder: (context, state) => const ReminderAssurancePage(),
+      ),
+      GoRoute(
         path: '/elder/family/:id',
-        builder: (context, state) => ElderPlaceholderPage(
+        builder: (context, state) => const ElderPlaceholderPage(
           title: '联系家人',
           subtitle: '与家人通话、发消息的入口将放在这里，当前为演示占位。',
         ),

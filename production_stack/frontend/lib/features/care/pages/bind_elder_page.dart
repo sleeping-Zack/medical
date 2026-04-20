@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_client.dart';
 import '../../../core/providers.dart';
+import '../providers/care_remote_providers.dart';
 
 class BindElderPage extends ConsumerStatefulWidget {
   const BindElderPage({super.key});
@@ -35,6 +36,7 @@ class _BindElderPageState extends ConsumerState<BindElderPage> {
         phoneLast4: _last4Ctrl.text.trim(),
       );
       if (!mounted) return;
+      ref.invalidate(boundEldersProvider);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('绑定成功')));
       context.pop();
     } on ApiException catch (e) {

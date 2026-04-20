@@ -3,13 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_client.dart';
-import '../../../core/providers.dart';
-import '../models/bound_elder.dart';
-
-final boundEldersProvider = FutureProvider.autoDispose<List<BoundElder>>((ref) async {
-  final repo = ref.watch(careRepositoryProvider);
-  return repo.listBindings();
-});
+import '../providers/care_remote_providers.dart';
 
 class BoundEldersPage extends ConsumerWidget {
   const BoundEldersPage({super.key});

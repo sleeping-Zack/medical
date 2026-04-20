@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../auth/providers/auth_controller.dart';
 import 'providers/elder_home_controller.dart';
 import 'theme/elder_home_colors.dart';
+import 'widgets/elder_care_plans_section.dart';
 import 'widgets/elder_family_section.dart';
 import 'widgets/elder_main_medication_card.dart';
 import 'widgets/elder_tip_footer.dart';
@@ -11,12 +13,19 @@ import 'widgets/elder_today_records_section.dart';
 import 'widgets/elder_weekly_trend_card.dart';
 import 'widgets/elder_welcome_header.dart';
 
-/// 长辈端首页：温暖、大字号、信息完整（当前为 Mock + Riverpod，可接 API）
-class ElderHomePage extends ConsumerWidget {
-  const ElderHomePage({super.key, required this.shortId});
+/// 长辈端首页：温暖、大字号、信息完整（当前为 Mock + Riverpod，可接 API）。
+/// [onOpenSettings] 与 Web 长辈顶栏「设置」一致；家属端切到长辈模式时传入以打开设置（含切回看护人）。
+class ElderHomePage extends ConsumerStatefulWidget {
+  const ElderHomePage({super.key, required this.shortId, this.onOpenSettings});
 
   final String shortId;
+  final VoidCallback? onOpenSettings;
 
+  @override
+  ConsumerState<ElderHomePage> createState() => _ElderHomePageState();
+}
+
+class _ElderHomePageState extends ConsumerState<ElderHomePage> with WidgetsBindingObserver {
   String _encourageLine(ElderHomeState s) {
     final last = s.weeklyTrend.isNotEmpty ? s.weeklyTrend.last : null;
     if (last == null) return '这一周，您已经做得很认真啦';
@@ -53,7 +62,31 @@ class ElderHomePage extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // StateNotifier 在「看护 ↔ 长辈」切换时不会销毁，仅依赖构造器里 microtask 会永远拿不到新计划/提醒
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(elderHomeControllerProvider.notifier).refreshFromApi();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.read(elderHomeControllerProvider.notifier).refreshFromApi();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final auth = ref.watch(authControllerProvider);
     final s = ref.watch(elderHomeControllerProvider);
     final ctrl = ref.read(elderHomeControllerProvider.notifier);
@@ -97,7 +130,7 @@ class ElderHomePage extends ConsumerWidget {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              '您的用药小帮手',
+                              '长辈版 · 大字好读',
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
@@ -107,11 +140,38 @@ class ElderHomePage extends ConsumerWidget {
                           ],
                         ),
                       ),
+                      if (widget.onOpenSettings != null)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(
+                              foregroundColor: ElderHomeColors.textWarm,
+                              backgroundColor: Colors.white.withValues(alpha: 0.92),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                side: BorderSide(color: ElderHomeColors.apricot.withValues(alpha: 0.55)),
+                              ),
+                            ),
+                            onPressed: widget.onOpenSettings,
+                            icon: const Icon(Icons.settings_outlined, size: 22),
+                            label: const Text('设置', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                          ),
+                        ),
                       TextButton(
                         onPressed: auth.isBusy ? null : () => ref.read(authControllerProvider.notifier).logout(),
+                        style: TextButton.styleFrom(
+                          foregroundColor: ElderHomeColors.textWarm,
+                          backgroundColor: Colors.white.withValues(alpha: 0.92),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(color: ElderHomeColors.apricot.withValues(alpha: 0.55)),
+                          ),
+                        ),
                         child: const Text(
                           '退出',
-                          style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
                         ),
                       ),
                     ],
@@ -127,7 +187,9 @@ class ElderHomePage extends ConsumerWidget {
                       phoneTailHint: _phoneTailHint(user?.phone),
                     ),
                     const SizedBox(height: 18),
-                    if (shortId.isNotEmpty)
+                    ElderCarePlansSection(plans: s.carePlans, loading: s.loading),
+                    const SizedBox(height: 18),
+                    if (widget.shortId.isNotEmpty)
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -164,7 +226,7 @@ class ElderHomePage extends ConsumerWidget {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    shortId,
+                                    widget.shortId,
                                     style: const TextStyle(
                                       fontSize: 28,
                                       fontWeight: FontWeight.w900,
@@ -213,13 +275,23 @@ class ElderHomePage extends ConsumerWidget {
                           ),
                         );
                       },
-                      onViewSchedule: () {
+                      onMissed: () {
+                        final next = s.nextPending;
+                        if (next != null) {
+                          ctrl.skipById(next.id);
+                        }
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content: Text('完整日程页即将接入，先在下面看看今天的记录吧'),
+                            content: Text('已记为今日不吃，这一剂今天不再提醒'),
                             behavior: SnackBarBehavior.floating,
                           ),
                         );
+                      },
+                      onViewSchedule: () {
+                        final next = s.nextPending;
+                        if (next != null) {
+                          context.push('/elder/reminder/${Uri.encodeComponent(next.id)}');
+                        }
                       },
                     ),
                     const SizedBox(height: 22),

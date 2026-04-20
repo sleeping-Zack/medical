@@ -14,6 +14,7 @@ class ElderMainMedicationCard extends StatelessWidget {
     required this.snoozeMessage,
     required this.onTaken,
     required this.onSnooze,
+    required this.onMissed,
     required this.onViewSchedule,
   });
 
@@ -24,6 +25,7 @@ class ElderMainMedicationCard extends StatelessWidget {
   final String? snoozeMessage;
   final VoidCallback onTaken;
   final VoidCallback onSnooze;
+  final VoidCallback onMissed;
   final VoidCallback onViewSchedule;
 
   @override
@@ -147,7 +149,6 @@ class ElderMainMedicationCard extends StatelessWidget {
               onTap: onViewSchedule,
             )
           else if (phase == ElderMainCardPhase.upcoming ||
-              phase == ElderMainCardPhase.dueNow ||
               phase == ElderMainCardPhase.hasMissed)
             Row(
               children: [
@@ -167,6 +168,28 @@ class ElderMainMedicationCard extends StatelessWidget {
                     color: ElderHomeColors.softBlue,
                     foreground: ElderHomeColors.textWarm,
                     onTap: onSnooze,
+                  ),
+                ),
+              ],
+            )
+          else if (phase == ElderMainCardPhase.dueNow)
+            Row(
+              children: [
+                Expanded(
+                  child: _bigButton(
+                    label: '我已服药',
+                    icon: Icons.check_circle_rounded,
+                    color: ElderHomeColors.successLeaf,
+                    onTap: onTaken,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _bigButton(
+                    label: '今日不吃',
+                    icon: Icons.close_rounded,
+                    color: ElderHomeColors.deepApricot,
+                    onTap: onMissed,
                   ),
                 ),
               ],

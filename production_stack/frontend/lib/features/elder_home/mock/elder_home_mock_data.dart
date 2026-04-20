@@ -36,6 +36,9 @@ class ElderHomeMockData {
     return [
       ElderTodayIntakeRecord(
         id: 'r0',
+        targetUserId: 0,
+        planId: 0,
+        scheduleId: '0-0',
         scheduledTime: d.add(const Duration(hours: 7)),
         medicineName: '阿司匹林',
         dosageLabel: '1 片',
@@ -43,6 +46,9 @@ class ElderHomeMockData {
       ),
       ElderTodayIntakeRecord(
         id: 'r1',
+        targetUserId: 0,
+        planId: 0,
+        scheduleId: '0-1',
         scheduledTime: d.add(const Duration(hours: 8)),
         medicineName: '降压药',
         dosageLabel: '1 片',
@@ -50,6 +56,9 @@ class ElderHomeMockData {
       ),
       ElderTodayIntakeRecord(
         id: 'r2',
+        targetUserId: 0,
+        planId: 0,
+        scheduleId: '0-2',
         scheduledTime: d.add(const Duration(hours: 12)),
         medicineName: '钙片',
         dosageLabel: '2 粒',
@@ -57,6 +66,9 @@ class ElderHomeMockData {
       ),
       ElderTodayIntakeRecord(
         id: 'r3',
+        targetUserId: 0,
+        planId: 0,
+        scheduleId: '0-3',
         scheduledTime: d.add(const Duration(hours: 16)),
         medicineName: '维生素',
         dosageLabel: '1 粒',
@@ -64,6 +76,9 @@ class ElderHomeMockData {
       ),
       ElderTodayIntakeRecord(
         id: 'r4',
+        targetUserId: 0,
+        planId: 0,
+        scheduleId: '0-4',
         scheduledTime: d.add(const Duration(hours: 20)),
         medicineName: '助眠胶囊',
         dosageLabel: '1 粒',
